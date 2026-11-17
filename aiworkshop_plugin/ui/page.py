@@ -8,6 +8,7 @@
 
 import json
 import queue
+import re
 import threading
 
 import objc
@@ -88,6 +89,94 @@ def _symbol(name, size=15):
         pass
     img.setTemplate_(True)
     return img
+
+
+_OPS = {
+    "set_bind": ("op", "gesture", "action"),
+    "set_gain": ("op", "value"),
+    "set_natural": ("op", "value"),
+    "set_hold_ms": ("op", "value"),
+    "set_rc_hold": ("op", "value"),
+    "set_input_mode": ("op", "value"),
+    "set_edid_correct": ("op", "value"),
+}
+
+
+def _coerce(op):
+    """把模型常见的字符串值转成宿主需要的类型。"""
+    o = dict(op)
+    name = o.get("op")
+    if name == "set_gain":
+        try: o["value"] = float(o.get("value"))
+        except Exception: return None
+    elif name in ("set_hold_ms", "set_rc_hold"):
+        try: o["value"] = int(float(o.get("value")))
+        except Exception: return None
+    elif name == "set_edid_correct":
+        v = o.get("value")
+        o["value"] = v if isinstance(v, bool) else str(v).lower() in ("true", "1", "on", "yes")
+    elif name == "set_input_mode":
+        o["value"] = str(o.get("value") or "").strip()
+    elif name == "set_natural":
+        o["value"] = str(o.get("value") or "").strip()
+    elif name == "set_bind":
+        o["gesture"] = str(o.get("gesture") or "").strip()
+        o["action"] = str(o.get("action") or "").strip()
+    return o
+
+
+def _repair_ops(ops, manifest):
+    """容忍模型用 {setting,value} 而不是 {op,...}：按标题映射回标准 op。"""
+    if not isinstance(ops, list):
+        return None
+    def _norm(x):
+        return re.sub(r"[\s·:：]+", "", str(x or ""))
+
+    by_title = {m.get("title"): m for m in (manifest or [])}
+    by_norm = {_norm(m.get("title")): m for m in (manifest or [])}
+    alias = {"轻点": "tap", "快速滑动": "swipe", "滑动": "swipe",
+             "停住再滑": "hold_swipe", "停住不动": "hold"}
+    out = []
+    for raw in ops:
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("op"):
+            fixed = _coerce(raw)
+            if fixed is None:
+                return None
+            out.append(fixed)
+            continue
+        title = raw.get("setting") or raw.get("name") or raw.get("title")
+        m = by_title.get(title) or by_norm.get(_norm(title))
+        if not m and str(title).strip() in alias:
+            g = alias[str(title).strip()]
+            m = next((x for x in (manifest or []) if x.get("gesture") == g), None)
+        if not m:
+            return None
+        val = raw.get("value", raw.get("action"))
+        if m["op"] == "set_bind":
+            fixed = _coerce({"op": "set_bind", "gesture": m.get("gesture"),
+                             "action": val})
+        else:
+            fixed = _coerce({"op": m["op"], "value": val})
+        if fixed is None:
+            return None
+        out.append(fixed)
+    return out
+
+
+def _valid_ops(ops):
+    if not isinstance(ops, list) or not ops:
+        return False
+    for op in ops:
+        if not isinstance(op, dict):
+            return False
+        name = op.get("op")
+        if name not in _OPS:
+            return False
+        if any(k not in op for k in _OPS[name]):
+            return False
+    return True
 
 
 def _extract_json(text):
@@ -483,7 +572,7 @@ class ChatPage(NSObject):
             msgs.append({"role": "user", "content": text})
         try:
             for ch in self.client.stream(self._provider(), self._model_id(),
-                                         msgs, cancel=self._cancel):
+                                         msgs, max_tokens=1600, cancel=self._cancel):
                 self._q.put(ch)
         except LLMError as e:
             self._q.put(("error", e.user_text()))
@@ -542,12 +631,22 @@ class ChatPage(NSObject):
         obj = _extract_json(text)
         api = self._api()
         if obj and obj.get("type") == "settings_change" and isinstance(obj.get("operations"), list):
+            api0 = self._api()
+            manifest = api0.manifest() if api0 else []
+            ops = _repair_ops(obj["operations"], manifest)
+            if ops is None or not _valid_ops(ops):
+                self._result_text = ("模型给的方案格式不对，无法应用。\n\n原始回复：\n"
+                                     + text[:600])
+                self.messages.append({"role": "assistant", "text": self._result_text})
+                store.save_session(self.messages)
+                self._layout_page()
+                return
             if api is None:
                 self._result_text = "这个方案需要改设置，但当前宿主没有提供设置接口。"
             else:
                 try:
-                    self._preview = api.preview(obj["operations"])
-                    self._pending_ops = obj["operations"]
+                    self._preview = api.preview(ops)
+                    self._pending_ops = ops
                     self._summary = obj.get("summary") or ""
                     self._result_text = ""
                 except Exception as e:
