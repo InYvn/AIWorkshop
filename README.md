@@ -54,6 +54,19 @@ for ch in c.stream("openrouter", "", [{"role": "user", "content": "hi"}]):
     ...
 ```
 
+## 界面
+
+![light](docs/ui-light.png)
+
+深色模式：`docs/ui-dark.png`。
+
+* 用户消息：右对齐 accent 气泡、白字；
+* 助手消息：图标 + 正文 + 独立代码块（圆角、等宽、横向滚动）；
+* 输入框：中性卡片、圆形发送键（空输入置灰）、Enter 发送 / Shift+Enter 换行；
+* 空状态：星标 + 三个示例问题；流式输出带光标，可随时停止。
+
+生成预览：`python3 tools/preview_ui.py /tmp/ui.png`（`PREVIEW_DARK=1` 出深色版）。
+
 ## 自检
 
 ```bash
