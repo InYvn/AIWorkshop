@@ -16,7 +16,7 @@
 import json
 import os
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _MANIFEST = os.path.join(os.path.dirname(_PKG_DIR), "plugin.json")

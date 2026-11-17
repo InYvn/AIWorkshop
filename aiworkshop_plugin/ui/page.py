@@ -438,7 +438,7 @@ class ChatPage(NSObject):
         tag_bg.layer().setCornerRadius_(6.0)
         card.addSubview_(tag_bg)
         card.addSubview_(_label("AI 分析", 30, 22, 56, 14, size=10, color=GREEN))
-        meta = self._status or ("待确认 · 点右下角应用" if self._pending_ops else "仅生成建议 · 不执行操作")
+        meta = self._status or ("待确认 · 点右下角应用" if self._pending_ops else "分析后给出方案 · 确认后生效")
         card.addSubview_(_label(meta, 96, 23, 300, 14, size=10, color=FAINT))
 
         # 待确认的方案：摘要 + 逐项差异 + 应用按钮
