@@ -6,6 +6,7 @@
 不是聊天气泡；AI 回答显示在「建议方案」卡里，流式追加。
 """
 
+import json
 import queue
 import threading
 
@@ -89,6 +90,43 @@ def _symbol(name, size=15):
     return img
 
 
+def _extract_json(text):
+    """从回复里取第一个配平的 JSON 对象；取不到返回 None。"""
+    if not text:
+        return None
+    start = text.find("{")
+    while start >= 0:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                    except Exception:
+                        break
+                    if isinstance(obj, dict):
+                        return obj
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
 class _Doc(NSView):
     def isFlipped(self):
         return True
@@ -123,6 +161,10 @@ class ChatPage(NSObject):
         self._result_view = None
         self._models = []
         self._settings = None
+        self._pending_ops = None
+        self._preview = []
+        self._summary = ""
+        self._status = ""
         return self
 
     # ------------------------------------------------------------ 页面
@@ -254,7 +296,7 @@ class ChatPage(NSObject):
         doc.addSubview_(_label("基于模型回答 · 不执行操作", x + cw - 220, y + 3, 220, 14,
                                size=10, color=FAINT, align=2))
         y += 28
-        rh = 240.0 if self._result_text else 96.0
+        rh = self._result_height()
         card2 = _card(doc, x, y, cw, rh)
         self._render_result(card2, cw, rh)
         y += rh + 26
@@ -288,11 +330,16 @@ class ChatPage(NSObject):
             row.addSubview_(chev)
             y += 64
 
-        y += 16
-        doc.addSubview_(_label("本地交互 · 不修改任何设置", x, y, cw, 14,
-                               size=10, color=FAINT, align=2))
         y += 30
         doc.setFrameSize_(NSMakeSize(w, max(y, self._h)))
+
+    @objc.python_method
+    def _result_height(self):
+        if self._pending_ops and self._preview:
+            return min(420.0, 132.0 + 26.0 * len(self._preview))
+        if self._result_text:
+            return 240.0
+        return 96.0
 
     @objc.python_method
     def _render_result(self, card, cw, rh):
@@ -302,8 +349,36 @@ class ChatPage(NSObject):
         tag_bg.layer().setCornerRadius_(6.0)
         card.addSubview_(tag_bg)
         card.addSubview_(_label("AI 分析", 30, 22, 56, 14, size=10, color=GREEN))
-        card.addSubview_(_label("仅生成建议 · 不执行操作", 96, 23, 240, 14,
-                                size=10, color=FAINT))
+        meta = self._status or ("待确认 · 点右下角应用" if self._pending_ops else "仅生成建议 · 不执行操作")
+        card.addSubview_(_label(meta, 96, 23, 300, 14, size=10, color=FAINT))
+
+        # 待确认的方案：摘要 + 逐项差异 + 应用按钮
+        if self._pending_ops and self._preview:
+            card.addSubview_(_label(self._summary or "建议修改", 20, 50, cw - 40, 20,
+                                    size=13, bold=True))
+            ry = 78.0
+            for c in self._preview:
+                old = "开" if c.old is True else "关" if c.old is False else str(c.old)
+                new = "开" if c.new is True else "关" if c.new is False else str(c.new)
+                card.addSubview_(_label("%s：%s → %s" % (c.title, old, new),
+                                        20, ry, cw - 160, 18, size=11.5))
+                if c.warn:
+                    card.addSubview_(_label(c.warn, cw - 150, ry, 130, 14, size=9.5,
+                                            color=FAINT, align=2))
+                ry += 26
+            bw = 104.0
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - bw - 20, rh - 42, bw, 30))
+            btn.setBordered_(False)
+            btn.setWantsLayer_(True)
+            btn.layer().setBackgroundColor_(ACCENT.CGColor())
+            btn.layer().setCornerRadius_(15.0)
+            btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+                "应用修改", {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.0),
+                          NSForegroundColorAttributeName: NSColor.whiteColor()}))
+            btn.setTarget_(self)
+            btn.setAction_("applyClicked:")
+            card.addSubview_(btn)
+            return
 
         tv = NSTextView.alloc().initWithFrame_(NSMakeRect(20, 50, cw - 40, rh - 64))
         tv.setEditable_(False)
@@ -313,7 +388,7 @@ class ChatPage(NSObject):
         tv.setTextColor_(TEXT)
         tv.setVerticallyResizable_(True)
         tv.textContainer().setWidthTracksTextView_(True)
-        tv.setString_(self._result_text or "还没有分析结果。写一句想法，点「分析想法」。")
+        tv.setString_(self._result_text or (self._status or "还没有分析结果。写一句想法，点「分析想法」。"))
         card.addSubview_(tv)
         self._result_view = tv
 
@@ -388,7 +463,11 @@ class ChatPage(NSObject):
         self.messages.append({"role": "user", "text": text})
         store.save_session(self.messages)
         self._result_text = ""
+        self._pending_ops = None
+        self._preview = []
+        self._summary = ""
         self._busy = True
+        self._status = "正在分析…"
         self._cancel.clear()
         self._layout_page()
         self._scroll_page_top()
@@ -396,7 +475,7 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _worker(self, text):
-        msgs = []
+        msgs = [{"role": "system", "content": self._system_prompt()}]
         for m in self.messages[-20:]:
             if m.get("role") in ("user", "assistant") and m.get("text"):
                 msgs.append({"role": m["role"], "content": m["text"]})
@@ -432,9 +511,8 @@ class ChatPage(NSObject):
                     changed = True
                 elif kind == "done":
                     self._busy = False
-                    if self._result_text:
-                        self.messages.append({"role": "assistant", "text": self._result_text})
-                        store.save_session(self.messages)
+                    self._status = ""
+                    self._finish_reply()
                 continue
             if getattr(item, "type", "") == "content":
                 self._result_text += item.text
@@ -443,6 +521,71 @@ class ChatPage(NSObject):
             self._result_view.setTextColor_(TEXT)
             self._result_view.setString_(self._result_text)
             self._scroll_result_bottom()
+
+    @objc.python_method
+    def _api(self):
+        try:
+            import dptouch_plugin as PLUG
+            return getattr(PLUG.host(), "settings_api", None)
+        except Exception:
+            return None
+
+    @objc.python_method
+    def _system_prompt(self):
+        api = self._api()
+        ctx = api.context_text() if api else "（宿主没有提供设置接口：只能解释，不能改设置）"
+        return "你是 Mipad DP Touch 的设置助手。\n\n" + ctx
+
+    @objc.python_method
+    def _finish_reply(self):
+        text = (self._result_text or "").strip()
+        obj = _extract_json(text)
+        api = self._api()
+        if obj and obj.get("type") == "settings_change" and isinstance(obj.get("operations"), list):
+            if api is None:
+                self._result_text = "这个方案需要改设置，但当前宿主没有提供设置接口。"
+            else:
+                try:
+                    self._preview = api.preview(obj["operations"])
+                    self._pending_ops = obj["operations"]
+                    self._summary = obj.get("summary") or ""
+                    self._result_text = ""
+                except Exception as e:
+                    self._result_text = "方案无法应用：%r" % (e,)
+        elif obj and obj.get("type") == "answer":
+            self._result_text = obj.get("text") or text
+        elif obj and obj.get("type") == "unsupported":
+            self._result_text = "\n".join(x for x in (obj.get("reason"), obj.get("why")) if x)
+        if self._result_text:
+            self.messages.append({"role": "assistant", "text": self._result_text})
+            store.save_session(self.messages)
+        self._layout_page()
+
+    def applyClicked_(self, sender):
+        api = self._api()
+        if api is None or not self._pending_ops:
+            return
+        res = api.apply(self._pending_ops)
+        if res.ok:
+            lines = ["已应用 %d 项修改：" % len(res.applied)]
+            for c in res.applied:
+                old = "开" if c.old is True else "关" if c.old is False else str(c.old)
+                new = "开" if c.new is True else "关" if c.new is False else str(c.new)
+                lines.append("· %s：%s → %s" % (c.title, old, new))
+            self._result_text = "\n".join(lines)
+        else:
+            msg = "应用失败：" + "；".join(res.errors or ["未知原因"])
+            if res.rollback_failed:
+                msg += "\n未能回滚：" + "；".join(res.rollback_failed)
+            elif res.rolled_back:
+                msg += "\n已回滚：" + "、".join(res.rolled_back)
+            self._result_text = msg
+        self._pending_ops = None
+        self._preview = []
+        self._summary = ""
+        self.messages.append({"role": "assistant", "text": self._result_text})
+        store.save_session(self.messages)
+        self._layout_page()
 
     @objc.python_method
     def _provider(self):
