@@ -1,24 +1,102 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI 许愿工坊的「侧栏页」版本（宿主内嵌，不弹独立窗口）。
+"""AI 许愿工坊 · 侧栏页（工作台布局）。
 
-宿主给一个 flipped 容器和宽高，这里按左上角本地坐标画：
-标题 + 模型下拉 / 对话滚动区 / 输入框。流式输出自己用 NSTimer 驱动。
+参考稿：灰底 + 白色圆角卡片、大标题、大输入卡、建议方案卡、最近的想法。
+不是聊天气泡；AI 回答显示在「建议方案」卡里，流式追加。
 """
 
 import queue
 import threading
 
 import objc
-from AppKit import (NSApplication, NSButton, NSFont, NSMakeRect, NSMakeSize,
-                    NSPopUpButton, NSScrollView, NSTextField, NSView,
-                    NSWindow)
+from AppKit import (NSApplication, NSAttributedString, NSButton, NSColor,
+                    NSFont, NSImageView, NSImage, NSMakeRect, NSMakeSize,
+                    NSPopUpButton, NSScrollView, NSTextField, NSTextView,
+                    NSView, NSLineBreakByWordWrapping,
+                    NSFontAttributeName, NSForegroundColorAttributeName,
+                    NSImageScaleProportionallyUpOrDown)
 from Foundation import NSObject, NSTimer
 
 from .. import store
 from ..llm import LLMClient, LLMError
-from . import theme
-from .chat_view import ChatList, Composer, _symbol
+
+W_MAX = 760.0
+PAD = 32.0
+ACCENT = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.42, 0.36, 0.91, 1.0)
+GREEN = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.13, 0.62, 0.42, 1.0)
+TEXT = NSColor.labelColor()
+DIM = NSColor.secondaryLabelColor()
+FAINT = NSColor.tertiaryLabelColor()
+
+
+def _dark():
+    try:
+        from AppKit import NSApp
+        return "Dark" in str(NSApp.effectiveAppearance().name())
+    except Exception:
+        return False
+
+
+def _card_bg():
+    return NSColor.colorWithCalibratedWhite_alpha_(0.17 if _dark() else 1.0, 1.0)
+
+
+def _page_bg():
+    return NSColor.colorWithCalibratedWhite_alpha_(0.10 if _dark() else 0.965, 1.0)
+
+
+def _border():
+    return NSColor.colorWithCalibratedWhite_alpha_(1.0 if _dark() else 0.0, 0.12)
+
+
+def _label(text, x, y, w, h, size=13.0, bold=False, color=None, align=0):
+    f = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+    f.setStringValue_(text)
+    f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
+    f.setTextColor_(color or TEXT)
+    f.setBezeled_(False)
+    f.setDrawsBackground_(False)
+    f.setEditable_(False)
+    f.setSelectable_(False)
+    if align:
+        f.setAlignment_(align)
+    return f
+
+
+def _card(box, x, y, w, h, radius=14.0):
+    v = _Card.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+    v.setWantsLayer_(True)
+    v.layer().setBackgroundColor_(_card_bg().CGColor())
+    v.layer().setCornerRadius_(radius)
+    v.layer().setBorderWidth_(1.0)
+    v.layer().setBorderColor_(_border().CGColor())
+    box.addSubview_(v)
+    return v
+
+
+def _symbol(name, size=15):
+    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    if img is None:
+        return None
+    try:
+        from AppKit import NSImageSymbolConfiguration
+        cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(size, 0.0)
+        img = img.imageWithSymbolConfiguration_(cfg) or img
+    except Exception:
+        pass
+    img.setTemplate_(True)
+    return img
+
+
+class _Doc(NSView):
+    def isFlipped(self):
+        return True
+
+
+class _Card(NSView):
+    def isFlipped(self):
+        return True
 
 
 class ChatPage(NSObject):
@@ -37,60 +115,23 @@ class ChatPage(NSObject):
         self._busy = False
         self._cancel = threading.Event()
         self._q = queue.Queue()
-        self._row = None
         self._timer = None
-        self._box = None
+        self._doc = None
+        self._w = 0.0
+        self._h = 0.0
+        self._result_text = ""
+        self._result_view = None
         self._models = []
-        pass
+        self._settings = None
         return self
 
-    # ------------------------------------------------------------ 构建
+    # ------------------------------------------------------------ 页面
     @objc.python_method
     def render(self, box, w, h):
-        self._box = box
-        self._w, self._h = float(w), float(h)
-
-        self._title = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 22))
-        self._title.setStringValue_("AI 许愿工坊")
-        self._title.setFont_(NSFont.boldSystemFontOfSize_(16.0))
-        self._title.setBezeled_(False)
-        self._title.setDrawsBackground_(False)
-        self._title.setEditable_(False)
-        box.addSubview_(self._title)
-
-        self._sub = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 22, 420, 16))
-        self._sub.setStringValue_("Kilo 免费 · 无需登录 / 无需 API Key")
-        self._sub.setFont_(NSFont.systemFontOfSize_(11.0))
-        self._sub.setTextColor_(theme.DIM)
-        self._sub.setBezeled_(False)
-        self._sub.setDrawsBackground_(False)
-        self._sub.setEditable_(False)
-        box.addSubview_(self._sub)
-
-        self._model = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(w - 240, 8, 210, 26), False)
-        self._model.setFont_(NSFont.systemFontOfSize_(12.0))
-        self._model.addItemWithTitle_("加载中…")
-        self._model.setTarget_(self)
-        self._model.setAction_("modelChanged:")
-        box.addSubview_(self._model)
-
-        self._gear = NSButton.alloc().initWithFrame_(NSMakeRect(w - 272, 10, 26, 26))
-        self._gear.setBordered_(False)
-        img = _symbol("slider.horizontal.3", 15, theme.DIM)
-        if img is not None:
-            self._gear.setImage_(img)
-        self._gear.setContentTintColor_(theme.DIM)
-        self._gear.setToolTip_("模型设置")
-        self._gear.setTarget_(self)
-        self._gear.setAction_("openSettings:")
-        box.addSubview_(self._gear)
-
-        composer_h = 64.0
-        top = 46.0
-        self._scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(0, top, w, max(80.0, h - top - composer_h - 10)))
-        self._scroll.setDrawsBackground_(False)
+        self._box, self._w, self._h = box, float(w), float(h)
+        self._scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+        self._scroll.setDrawsBackground_(True)
+        self._scroll.setBackgroundColor_(_page_bg())
         self._scroll.setBorderType_(0)
         self._scroll.setHasVerticalScroller_(True)
         self._scroll.setAutohidesScrollers_(True)
@@ -98,93 +139,260 @@ class ChatPage(NSObject):
             self._scroll.setScrollerStyle_(1)
         except Exception:
             pass
-        self._chat = ChatList.alloc().initWithFrame_(NSMakeRect(0, 0, w - 14, 100))
-        self._scroll.setDocumentView_(self._chat)
+        self._doc = _Doc.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+        self._scroll.setDocumentView_(self._doc)
         box.addSubview_(self._scroll)
-
-        self._composer = Composer.alloc().initWithFrame_(
-            NSMakeRect(0, h - composer_h - 2, w, composer_h))
-        self._composer.on_send = self.onSend
-        self._composer.resizeSubviewsWithOldSize_(NSMakeSize(0, 0))
-        box.addSubview_(self._composer)
-
-        self._render_history()
+        self._layout_page()
         self._load_models_async()
         if self._timer is None:
             self._timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.05, self, "drain:", None, True)
 
     @objc.python_method
-    def _render_history(self):
-        self._chat.remove_all()
-        for m in self.messages:
-            self._chat.add_message(m.get("role", "user"), m.get("text", ""))
-        self._relayout()
-        self._scroll_bottom()
+    def _layout_page(self):
+        doc = self._doc
+        for v in list(doc.subviews()):
+            v.removeFromSuperview()
+        w = self._w
+        cw = min(W_MAX, w - 2 * PAD)
+        x = (w - cw) / 2.0
+        y = 24.0
+
+        # ---- 品牌行
+        icon_bg = NSView.alloc().initWithFrame_(NSMakeRect(x, y, 44, 44))
+        icon_bg.setWantsLayer_(True)
+        icon_bg.layer().setBackgroundColor_(ACCENT.CGColor())
+        icon_bg.layer().setCornerRadius_(12.0)
+        doc.addSubview_(icon_bg)
+        ic = NSImageView.alloc().initWithFrame_(NSMakeRect(12, 12, 20, 20))
+        img = _symbol("sparkles", 18)
+        if img is not None:
+            ic.setImage_(img)
+            ic.setContentTintColor_(NSColor.whiteColor())
+        icon_bg.addSubview_(ic)
+        doc.addSubview_(_label("AI 许愿工坊", x + 58, y + 2, 300, 22, size=16, bold=True))
+        doc.addSubview_(_label("轻量工作台 · 从一个想法开始", x + 58, y + 24, 320, 16,
+                               size=11, color=DIM))
+
+        self._model = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(x + cw - 154, y + 8, 118, 28), False)
+        self._model.setFont_(NSFont.systemFontOfSize_(11.5))
+        self._model.addItemWithTitle_("Kilo 免费")
+        self._model.setTarget_(self)
+        self._model.setAction_("modelChanged:")
+        doc.addSubview_(self._model)
+
+        gear = NSButton.alloc().initWithFrame_(NSMakeRect(x + cw - 30, y + 8, 28, 28))
+        gear.setBordered_(False)
+        gimg = _symbol("gearshape", 15)
+        if gimg is not None:
+            gear.setImage_(gimg)
+        gear.setContentTintColor_(DIM)
+        gear.setToolTip_("模型设置")
+        gear.setTarget_(self)
+        gear.setAction_("openSettings:")
+        doc.addSubview_(gear)
+        y += 78
+
+        # ---- Hero
+        doc.addSubview_(_label("想让平板怎样工作？", x, y, cw, 38, size=26, bold=True))
+        y += 44
+        doc.addSubview_(_label("描述你的想法，我先分析能否用现有设置实现，还是需要开发新插件。",
+                               x, y, cw, 18, size=12, color=DIM))
+        y += 30
+
+        # ---- 输入卡
+        ph = 140.0
+        card = _card(doc, x, y, cw, ph)
+        self._tv = NSTextView.alloc().initWithFrame_(NSMakeRect(20, 14, cw - 40, 72))
+        self._tv.setFont_(NSFont.systemFontOfSize_(14.0))
+        self._tv.setDrawsBackground_(False)
+        self._tv.setRichText_(False)
+        self._tv.setVerticallyResizable_(True)
+        self._tv.textContainer().setWidthTracksTextView_(True)
+        self._tv.setDelegate_(self)
+        card.addSubview_(self._tv)
+        self._placeholder = _label("把触控笔轻点改成右键", 24, 16, cw - 48, 20,
+                                   size=14, color=FAINT)
+        card.addSubview_(self._placeholder)
+        card.addSubview_(_label("⏎  /  Ctrl + Enter 分析", 20, ph - 30, 240, 16,
+                                size=10.5, color=DIM))
+        self._send_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 148, ph - 42, 128, 34))
+        self._send_btn.setBordered_(False)
+        self._send_btn.setWantsLayer_(True)
+        self._send_btn.layer().setBackgroundColor_(ACCENT.CGColor())
+        self._send_btn.layer().setCornerRadius_(17.0)
+        self._send_btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+            "✦  分析想法",
+            {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.5),
+             NSForegroundColorAttributeName: NSColor.whiteColor()}))
+        self._send_btn.setTarget_(self)
+        self._send_btn.setAction_("sendClicked:")
+        card.addSubview_(self._send_btn)
+        self._update_send(False)
+        y += ph + 14
+
+        # ---- chips
+        doc.addSubview_(_label("试试", x, y + 4, 40, 16, size=11, color=DIM))
+        cx = x + 44
+        for i, t in enumerate(("笔手势映射", "手指双击", "截图按钮")):
+            b = NSButton.alloc().initWithFrame_(NSMakeRect(cx, y, 96, 26))
+            b.setTitle_(t)
+            b.setBezelStyle_(1)
+            b.setFont_(NSFont.systemFontOfSize_(11.0))
+            b.setTag_(i)
+            b.setTarget_(self)
+            b.setAction_("chipClicked:")
+            b.sizeToFit()
+            b.setFrameSize_(NSMakeSize(max(84.0, b.frame().size.width + 20), 26))
+            doc.addSubview_(b)
+            cx += b.frame().size.width + 8
+        y += 44
+
+        # ---- 建议方案
+        doc.addSubview_(_label("建议方案", x, y, 200, 20, size=14, bold=True))
+        doc.addSubview_(_label("基于模型回答 · 不执行操作", x + cw - 220, y + 3, 220, 14,
+                               size=10, color=FAINT, align=2))
+        y += 28
+        rh = 240.0 if self._result_text else 96.0
+        card2 = _card(doc, x, y, cw, rh)
+        self._render_result(card2, cw, rh)
+        y += rh + 26
+
+        # ---- 最近的想法
+        recent = [m for m in self.messages if m.get("role") == "user"][-3:]
+        doc.addSubview_(_label("最近的想法", x, y, 200, 20, size=14, bold=True))
+        doc.addSubview_(_label("%d 条" % len(recent), x + cw - 60, y + 3, 60, 14,
+                               size=10, color=FAINT, align=2))
+        y += 28
+        if not recent:
+            doc.addSubview_(_label("还没有想法。上面写一句，回车或点「分析想法」。",
+                                   x, y, cw, 18, size=11, color=FAINT))
+            y += 28
+        for m in reversed(recent):
+            row = _card(doc, x, y, cw, 56, radius=10)
+            ic = NSImageView.alloc().initWithFrame_(NSMakeRect(16, 19, 18, 18))
+            img = _symbol("bolt", 14)
+            if img is not None:
+                ic.setImage_(img)
+                ic.setContentTintColor_(FAINT)
+            row.addSubview_(ic)
+            row.addSubview_(_label(str(m.get("text") or "")[:60], 46, 11, cw - 90, 18,
+                                   size=12.5))
+            row.addSubview_(_label("最近 · 设置", 46, 30, 200, 14, size=10, color=FAINT))
+            chev = NSImageView.alloc().initWithFrame_(NSMakeRect(cw - 30, 21, 14, 14))
+            cimg = _symbol("chevron.right", 11)
+            if cimg is not None:
+                chev.setImage_(cimg)
+                chev.setContentTintColor_(FAINT)
+            row.addSubview_(chev)
+            y += 64
+
+        y += 16
+        doc.addSubview_(_label("本地交互 · 不修改任何设置", x, y, cw, 14,
+                               size=10, color=FAINT, align=2))
+        y += 30
+        doc.setFrameSize_(NSMakeSize(w, max(y, self._h)))
 
     @objc.python_method
-    def _relayout(self):
-        w = self._scroll.contentView().bounds().size.width
-        self._chat.relayout(w)
-        self._scroll_bottom()
+    def _render_result(self, card, cw, rh):
+        tag_bg = NSView.alloc().initWithFrame_(NSMakeRect(20, 18, 64, 22))
+        tag_bg.setWantsLayer_(True)
+        tag_bg.layer().setBackgroundColor_(GREEN.colorWithAlphaComponent_(0.12).CGColor())
+        tag_bg.layer().setCornerRadius_(6.0)
+        card.addSubview_(tag_bg)
+        card.addSubview_(_label("AI 分析", 30, 22, 56, 14, size=10, color=GREEN))
+        card.addSubview_(_label("仅生成建议 · 不执行操作", 96, 23, 240, 14,
+                                size=10, color=FAINT))
+
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(20, 50, cw - 40, rh - 64))
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setDrawsBackground_(False)
+        tv.setFont_(NSFont.systemFontOfSize_(12.5))
+        tv.setTextColor_(TEXT)
+        tv.setVerticallyResizable_(True)
+        tv.textContainer().setWidthTracksTextView_(True)
+        tv.setString_(self._result_text or "还没有分析结果。写一句想法，点「分析想法」。")
+        card.addSubview_(tv)
+        self._result_view = tv
+
+        if not self._result_text:
+            tv.setTextColor_(FAINT)
+        self._scroll_result_bottom()
 
     @objc.python_method
-    def _scroll_bottom(self):
+    def _scroll_result_bottom(self):
         try:
-            ch = self._chat.content_height()
-            vh = self._scroll.contentView().bounds().size.height
-            self._scroll.contentView().scrollToPoint_((0, max(0.0, ch - vh)))
+            tv = self._result_view
+            n = len(str(tv.string() or ""))
+            tv.scrollRangeToVisible_((n, 0))
+        except Exception:
+            pass
+
+    @objc.python_method
+    def _scroll_page_top(self):
+        try:
+            self._scroll.contentView().scrollToPoint_((0, 0))
             self._scroll.reflectScrolledClipView_(self._scroll.contentView())
         except Exception:
             pass
 
-    # ------------------------------------------------------------ 发送
-    @objc.python_method
-    def _provider(self):
-        pid = self.cfg.get("provider") or "kilo"
-        return pid if pid in self.client.provider_ids() else "kilo"
-
-    @objc.python_method
-    def _selected_model(self):
+    # ------------------------------------------------------------ 输入
+    def textDidChange_(self, note):
         try:
-            return str(self._model.titleOfSelectedItem() or "")
+            has = bool(str(self._tv.string() or "").strip())
+            self._placeholder.setHidden_(has)
+            self._update_send(has)
         except Exception:
-            return "kilo-auto/free"
+            pass
 
     @objc.python_method
-    def _append(self, role, text):
-        self.messages.append({"role": role, "text": text})
-        self._chat.add_message(role, text)
-        self._relayout()
-        store.save_session(self.messages)
-        return self._chat.rows[-1]
+    def _update_send(self, has=None):
+        if has is None:
+            has = bool(str(self._tv.string() or "").strip())
+        self._send_btn.setEnabled_(bool(has))
+        self._send_btn.layer().setBackgroundColor_(
+            (ACCENT if has else ACCENT.colorWithAlphaComponent_(0.38)).CGColor())
 
-    def onSend(self):
+    def textView_doCommandBySelector_(self, tv, sel):
+        from AppKit import NSApp
+        if sel == "insertNewline:":
+            ev = NSApp.currentEvent()
+            if ev is not None and (ev.modifierFlags() & (1 << 18)):
+                tv.insertNewline_(None)
+                return True
+            self._submit()
+            return True
+        return False
+
+    def chipClicked_(self, sender):
+        texts = ("把笔的轻点改成右键", "让手指双击变成一次左键单击", "做一个截图按钮插件")
+        i = max(0, min(int(sender.tag()), len(texts) - 1))
+        self._tv.setString_(texts[i])
+        self._placeholder.setHidden_(True)
+
+    def sendClicked_(self, sender):
+        self._submit()
+
+    @objc.python_method
+    def _submit(self):
         if self._busy:
-            self.stop()
             return
-        text = self._composer.text().strip()
+        text = str(self._tv.string() or "").strip()
         if not text:
             return
-        self._composer.clear()
-        self._append("user", text)
-        self._row = self._append("assistant", "")
-        self._row.setStreaming_(True)
+        self._tv.setString_("")
+        self._placeholder.setHidden_(False)
+        self._update_send(False)
+        self.messages.append({"role": "user", "text": text})
+        store.save_session(self.messages)
+        self._result_text = ""
         self._busy = True
         self._cancel.clear()
-        self._composer.set_stop(True)
-        self._sub.setStringValue_("正在生成… · %s" % (self._selected_model() or "Kilo"))
+        self._layout_page()
+        self._scroll_page_top()
         threading.Thread(target=self._worker, args=(text,), daemon=True).start()
-
-    @objc.python_method
-    def stop(self):
-        if not self._busy:
-            return
-        self._cancel.set()
-        self._busy = False
-        self._composer.set_stop(False)
-        if self._row is not None:
-            self._row.setStreaming_(False)
 
     @objc.python_method
     def _worker(self, text):
@@ -195,7 +403,7 @@ class ChatPage(NSObject):
         if not msgs or msgs[-1].get("role") != "user":
             msgs.append({"role": "user", "content": text})
         try:
-            for ch in self.client.stream(self._provider(), self._selected_model(),
+            for ch in self.client.stream(self._provider(), self._model_id(),
                                          msgs, cancel=self._cancel):
                 self._q.put(ch)
         except LLMError as e:
@@ -206,10 +414,6 @@ class ChatPage(NSObject):
             self._q.put(("done", None))
 
     def drain_(self, timer):
-        self._drain()
-
-    @objc.python_method
-    def _drain(self):
         changed = False
         while True:
             try:
@@ -222,69 +426,68 @@ class ChatPage(NSObject):
                     self._fill_models(payload)
                     continue
                 if kind == "models_error":
-                    self._sub.setStringValue_("模型列表加载失败：%s" % payload)
-                    continue
-                if self._row is None:
                     continue
                 if kind == "error":
-                    self._row.append_text("\n\n⚠️ " + str(payload))
+                    self._result_text += ("\n\n⚠️ " + str(payload))
                     changed = True
                 elif kind == "done":
-                    self._finish()
-                    changed = True
-                continue
-            if self._row is None:
+                    self._busy = False
+                    if self._result_text:
+                        self.messages.append({"role": "assistant", "text": self._result_text})
+                        store.save_session(self.messages)
                 continue
             if getattr(item, "type", "") == "content":
-                self._row.append_text(item.text)
+                self._result_text += item.text
                 changed = True
-        if changed:
-            self._relayout()
+        if changed and self._result_view is not None:
+            self._result_view.setTextColor_(TEXT)
+            self._result_view.setString_(self._result_text)
+            self._scroll_result_bottom()
 
     @objc.python_method
-    def _finish(self):
-        if self._row is not None:
-            self._row.setStreaming_(False)
-        self._busy = False
-        self._composer.set_stop(False)
-        self._sub.setStringValue_("Kilo 免费 · 无需登录 / 无需 API Key")
-        self.messages = [m for m in self.messages
-                         if not (m.get("role") == "assistant" and not m.get("text"))]
-        store.save_session(self.messages)
-        self._row = None
+    def _provider(self):
+        pid = self.cfg.get("provider") or "kilo"
+        return pid if pid in self.client.provider_ids() else "kilo"
 
-    # ------------------------------------------------------------ 模型 / 设置
+    @objc.python_method
+    def _model_id(self):
+        try:
+            t = str(self._model.titleOfSelectedItem() or "")
+            return "" if t in ("Kilo 免费", "加载中…") else t
+        except Exception:
+            return ""
+
+    def modelChanged_(self, sender):
+        self.cfg["model"] = self._model_id()
+        store.save_config(self.cfg)
+
+    def openSettings_(self, sender):
+        try:
+            from .settings import SettingsSheet
+            if self._settings is None:
+                self._settings = SettingsSheet.alloc().init()
+            self._settings.show(self)
+        except Exception as e:
+            self._result_text = "打开设置失败：%r" % (e,)
+            self._layout_page()
+
     @objc.python_method
     def _load_models_async(self):
         def run():
             try:
                 self._q.put(("models", self.client.list_models(self._provider(), force=True)))
-            except Exception as e:
-                self._q.put(("models_error", str(e)))
+            except Exception:
+                pass
         threading.Thread(target=run, daemon=True).start()
 
     @objc.python_method
     def _fill_models(self, models):
         self._models = models
         self._model.removeAllItems()
-        for m in models[:40]:
-            self._model.addItemWithTitle_(m.id)
-        if not models:
-            self._model.addItemWithTitle_("无可用模型")
+        titles = [m.id for m in models[:20]] or ["Kilo 免费"]
+        for t in titles:
+            self._model.addItemWithTitle_(t)
         want = self.cfg.get("model") or "kilo-auto/free"
         i = self._model.indexOfItemWithTitle_(want)
         if i >= 0:
             self._model.selectItemAtIndex_(i)
-
-    def modelChanged_(self, sender):
-        self.cfg["model"] = self._selected_model()
-        store.save_config(self.cfg)
-
-    def openSettings_(self, sender):
-        try:
-            from .settings import SettingsSheet
-            if not getattr(self, "_settings", None):
-                self._settings = SettingsSheet.alloc().init()
-            self._settings.show(self)
-        except Exception as e:
-            self._sub.setStringValue_("打开设置失败：%r" % (e,))
