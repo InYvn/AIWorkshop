@@ -16,7 +16,7 @@
 import json
 import os
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _MANIFEST = os.path.join(os.path.dirname(_PKG_DIR), "plugin.json")
@@ -35,6 +35,7 @@ class Controller(object):
         self._on_hide = on_hide
         self._log = log or (lambda _m: None)
         self._win = None
+        self._page = None
 
     def _ensure(self):
         if self._win is None:
@@ -60,6 +61,14 @@ class Controller(object):
         else:
             self.show()
 
+    def build_page(self, box, width, height):
+        """宿主侧栏页：把聊天界面嵌进给定的 flipped 容器。"""
+        from .ui.page import ChatPage
+        if self._page is None:
+            self._page = ChatPage.alloc().init()
+        self._page.render(box, width, height)
+        return height
+
     def set_auto(self, on):
         pass
 
@@ -68,9 +77,16 @@ class Controller(object):
             self._win.tick()
 
     def close(self):
+        if self._page is not None and self._page._timer is not None:
+            try:
+                self._page._timer.invalidate()
+            except Exception:
+                pass
+            self._page._timer = None
         if self._win is not None:
             self._win.close()
             self._win = None
+        self._page = None
 
 
 def create(on_hide=None, log=None):

@@ -2,9 +2,15 @@
   "id": "aiworkshop",
   "name": "AI 许愿工坊",
   "blurb": "统一模型服务：Kilo 免费开箱即用；自定义 API 走 OpenAI 兼容或 LiteLLM。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "min_host": "2.2.5",
   "api": 1,
   "entry": "aiworkshop_plugin",
-  "size_note": "约 60 KB"
+  "size_note": "约 60 KB",
+  "page": {
+    "id": "aiworkshop",
+    "title": "AI 许愿工坊",
+    "icon": "sparkles",
+    "order": 90
+  }
 }
