@@ -44,6 +44,21 @@ def _card_bg():
     return NSColor.colorWithCalibratedWhite_alpha_(0.17 if _dark() else 1.0, 1.0)
 
 
+_ACTION_CN = {
+    "left": "左键", "right": "右键", "middle": "中键", "double": "双击",
+    "scroll": "滚动", "drag": "拖拽", "none": "无", "space": "空格",
+    "back": "后退", "screen": "截屏",
+}
+
+
+def _show(v):
+    if v is True:
+        return "开"
+    if v is False:
+        return "关"
+    return _ACTION_CN.get(str(v), str(v))
+
+
 def _page_bg():
     return NSColor.colorWithCalibratedWhite_alpha_(0.10 if _dark() else 0.965, 1.0)
 
@@ -382,7 +397,7 @@ class ChatPage(NSObject):
 
         # ---- 建议方案
         doc.addSubview_(_label("建议方案", x, y, 200, 20, size=14, bold=True))
-        doc.addSubview_(_label("基于模型回答 · 不执行操作", x + cw - 220, y + 3, 220, 14,
+        doc.addSubview_(_label("模型给出方案 · 确认后应用", x + cw - 220, y + 3, 220, 14,
                                size=10, color=FAINT, align=2))
         y += 28
         rh = self._result_height()
@@ -425,7 +440,7 @@ class ChatPage(NSObject):
     @objc.python_method
     def _result_height(self):
         if self._pending_ops and self._preview:
-            return min(420.0, 132.0 + 26.0 * len(self._preview))
+            return min(420.0, 120.0 + 26.0 * len(self._preview))
         if self._result_text or self._busy:
             return 240.0
         return 96.0
@@ -447,8 +462,7 @@ class ChatPage(NSObject):
                                     size=13, bold=True))
             ry = 78.0
             for c in self._preview:
-                old = "开" if c.old is True else "关" if c.old is False else str(c.old)
-                new = "开" if c.new is True else "关" if c.new is False else str(c.new)
+                old, new = _show(c.old), _show(c.new)
                 card.addSubview_(_label("%s：%s → %s" % (c.title, old, new),
                                         20, ry, cw - 160, 18, size=11.5))
                 if c.warn:
@@ -668,9 +682,7 @@ class ChatPage(NSObject):
         if res.ok:
             lines = ["已应用 %d 项修改：" % len(res.applied)]
             for c in res.applied:
-                old = "开" if c.old is True else "关" if c.old is False else str(c.old)
-                new = "开" if c.new is True else "关" if c.new is False else str(c.new)
-                lines.append("· %s：%s → %s" % (c.title, old, new))
+                lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
             self._result_text = "\n".join(lines)
         else:
             msg = "应用失败：" + "；".join(res.errors or ["未知原因"])
