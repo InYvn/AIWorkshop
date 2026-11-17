@@ -426,7 +426,7 @@ class ChatPage(NSObject):
     def _result_height(self):
         if self._pending_ops and self._preview:
             return min(420.0, 132.0 + 26.0 * len(self._preview))
-        if self._result_text:
+        if self._result_text or self._busy:
             return 240.0
         return 96.0
 
