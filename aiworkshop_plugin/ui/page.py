@@ -720,7 +720,7 @@ class ChatPage(NSObject):
             from .settings import SettingsSheet
             if self._settings is None:
                 self._settings = SettingsSheet.alloc().init()
-            self._settings.show(self)
+            self._settings.present(self)
         except Exception as e:
             self._result_text = "打开设置失败：%r" % (e,)
             self._layout_page()

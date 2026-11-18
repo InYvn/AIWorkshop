@@ -33,7 +33,8 @@ class SettingsSheet(NSObject):
         self._test_result = None
         return self
 
-    def show(self, chat):
+    @objc.python_method
+    def present(self, chat):
         self.chat = chat
         W, H = 540.0, 360.0
         p = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -107,8 +108,10 @@ class SettingsSheet(NSObject):
         self.panel = p
         self._load_provider()
         p.center()
-        NSApplication.sharedApplication().runModalForWindow_(p)
+        p.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
+    @objc.python_method
     def _button(self, title, x, y, w, target, action):
         from AppKit import NSButton
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, 28))
@@ -120,11 +123,13 @@ class SettingsSheet(NSObject):
         return b
 
     # ------------------------------------------------------------ 数据
+    @objc.python_method
     def _pid(self):
         ids = self.chat.client.provider_ids()
         i = self._popup.indexOfSelectedItem()
         return ids[max(0, min(i, len(ids) - 1))]
 
+    @objc.python_method
     def _load_provider(self):
         pid = self._pid()
         meta = self.chat.client.provider(pid)
@@ -152,6 +157,7 @@ class SettingsSheet(NSObject):
         self._result.setStringValue_("测试中…")
         threading.Thread(target=self._run_test, args=(pid, model), daemon=True).start()
 
+    @objc.python_method
     def _run_test(self, pid, model):
         try:
             r = self.chat.client.test(pid, model or None)
@@ -197,6 +203,7 @@ class SettingsSheet(NSObject):
     def cancelClicked_(self, sender):
         self._close()
 
+    @objc.python_method
     def _close(self):
         try:
             NSApplication.sharedApplication().stopModal()
