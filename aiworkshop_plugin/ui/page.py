@@ -484,9 +484,9 @@ class ChatPage(NSObject):
     @objc.python_method
     def _result_height(self):
         if self.state.pending_ops and self.state.preview:
-            return min(420.0, 120.0 + 26.0 * len(self.state.preview))
+            return min(440.0, 150.0 + 26.0 * len(self.state.preview))
         if self.state.result_text or self.state.busy:
-            return 240.0
+            return 268.0 if self.state.undo_available else 240.0
         return 96.0
 
     @objc.python_method
@@ -497,21 +497,39 @@ class ChatPage(NSObject):
         tag_bg.layer().setCornerRadius_(6.0)
         card.addSubview_(tag_bg)
         card.addSubview_(_label("AI 分析", 30, 22, 56, 14, size=10, color=GREEN))
-        meta = self.state.status or ("待确认 · 点右下角应用" if self.state.pending_ops
-                                     else "分析后给出方案 · 确认后生效")
-        card.addSubview_(_label(meta, 96, 23, 300, 14, size=10, color=FAINT))
+        pending = bool(self.state.pending_ops and self.state.preview)
+        if pending:
+            meta = self.state.status or "待确认 · 点右下角应用"
+        elif self.state.undo_available:
+            meta = "已应用 · 可撤销"
+        else:
+            meta = self.state.status or "分析后给出方案 · 确认后生效"
+        card.addSubview_(_label(meta, 96, 23, 320, 14, size=10, color=FAINT))
+        self._result_view = None
 
-        # 待确认的方案：摘要 + 逐项差异 + 应用按钮
-        if self.state.pending_ops and self.state.preview:
-            card.addSubview_(_label(self.state.summary or "建议修改", 20, 50, cw - 40, 20,
+        # ---- 待确认：逐项差异（将修改 / 未修改）
+        if pending:
+            noop = sum(1 for c in self.state.preview
+                       if str(c.warn or "").startswith("已经是这个值"))
+            card.addSubview_(_label(self.state.summary or "建议修改", 20, 46, cw - 40, 20,
                                     size=13, bold=True))
-            ry = 78.0
+            card.addSubview_(_label("%d 项将修改 · %d 项不变"
+                                    % (len(self.state.preview) - noop, noop),
+                                    20, 68, cw - 40, 14, size=10, color=FAINT))
+            ry = 94.0
             for c in self.state.preview:
-                old, new = _show(c.old), _show(c.new)
-                card.addSubview_(_label("%s：%s → %s" % (c.title, old, new),
-                                        20, ry, cw - 160, 18, size=11.5))
+                same = str(c.warn or "").startswith("已经是这个值")
+                row = _label("%s：%s → %s" % (c.title, _show(c.old), _show(c.new)),
+                             20, ry, cw - 220, 18, size=11.5,
+                             color=FAINT if same else TEXT)
                 if c.warn:
-                    card.addSubview_(_label(c.warn, cw - 150, ry, 130, 14, size=9.5,
+                    row.setToolTip_(str(c.warn))
+                card.addSubview_(row)
+                card.addSubview_(_label("未修改" if same else "将修改",
+                                        cw - 176, ry, 56, 14, size=9.5,
+                                        color=FAINT, align=2))
+                if c.warn and not same and len(str(c.warn)) <= 10:
+                    card.addSubview_(_label(str(c.warn), cw - 112, ry, 92, 14, size=9.5,
                                             color=FAINT, align=2))
                 ry += 26
             bw = 104.0
@@ -528,7 +546,9 @@ class ChatPage(NSObject):
             card.addSubview_(btn)
             return
 
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(20, 50, cw - 40, rh - 64))
+        # ---- 结果文本（已应用 / 未修改 / 失败）
+        tv_h = rh - 64 - (40.0 if self.state.undo_available else 0.0)
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(20, 50, cw - 40, tv_h))
         tv.setEditable_(False)
         tv.setSelectable_(True)
         tv.setDrawsBackground_(False)
@@ -543,6 +563,18 @@ class ChatPage(NSObject):
 
         if not self.state.result_text:
             tv.setTextColor_(FAINT)
+
+        if self.state.undo_available:
+            ub = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 104, rh - 42, 84, 28))
+            ub.setTitle_("撤销")
+            ub.setBezelStyle_(1)
+            ub.setFont_(NSFont.systemFontOfSize_(12.0))
+            ub.setTarget_(self)
+            ub.setAction_("undoClicked:")
+            card.addSubview_(ub)
+            card.addSubview_(_label("点「撤销」把上面这些设置恢复原值", 20, rh - 38, cw - 130, 16,
+                                    size=10, color=FAINT))
+
         self._scroll_result_bottom()
 
     @objc.python_method
@@ -690,35 +722,45 @@ class ChatPage(NSObject):
         text = (st.result_text or "").strip()
         obj = _extract_json(text)
         api = self._api()
+        saved = False
+
         if obj and obj.get("type") == "settings_change" and isinstance(obj.get("operations"), list):
-            api0 = self._api()
-            manifest = api0.manifest() if api0 else []
+            manifest = api.manifest() if api else []
             ops = _repair_ops(obj["operations"], manifest)
             if ops is None or not _valid_ops(ops):
-                st.result_text = ("模型给的方案格式不对，无法应用。\n\n原始回复：\n"
+                st.result_text = ("未修改：模型给的方案格式不对，无法应用。\n\n原始回复：\n"
                                   + text[:600])
-                st.messages.append({"role": "assistant", "text": st.result_text})
-                store.save_session(st.messages)
-                self._refresh_cards()
-                return
-            if api is None:
-                st.result_text = "这个方案需要改设置，但当前宿主没有提供设置接口。"
+            elif api is None:
+                st.result_text = "未修改：这个方案需要改设置，但当前宿主没有提供设置接口。"
             else:
                 try:
-                    st.preview = tuple(api.preview(tuple(ops)))
-                    st.pending_ops = tuple(ops)
-                    st.summary = obj.get("summary") or ""
-                    st.result_text = ""
-                    st.messages.append({"role": "assistant",
-                                        "text": "建议修改：" + (st.summary or "（已生成方案）")})
-                    store.save_session(st.messages)
+                    prev = tuple(api.preview(tuple(ops)))
                 except Exception as e:
-                    st.result_text = "方案无法应用：%r" % (e,)
+                    st.result_text = "未修改：方案没通过校验（%s）。" % (e,)
+                else:
+                    noop = [c for c in prev
+                            if str(c.warn or "").startswith("已经是这个值")]
+                    st.preview = prev
+                    st.summary = obj.get("summary") or ""
+                    if prev and len(noop) == len(prev):
+                        st.pending_ops = ()
+                        st.result_text = ("未修改：这些设置已经是目标值\n"
+                                          + "\n".join("· %s：%s" % (c.title, _show(c.new))
+                                                      for c in noop))
+                    else:
+                        st.pending_ops = tuple(ops)
+                        st.result_text = ""
+                        st.messages.append({"role": "assistant",
+                                            "text": "建议修改：" + (st.summary or "（已生成方案）")})
+                        store.save_session(st.messages)
+                        saved = True
         elif obj and obj.get("type") == "answer":
             st.result_text = obj.get("text") or text
         elif obj and obj.get("type") == "unsupported":
-            st.result_text = "\n".join(x for x in (obj.get("reason"), obj.get("why")) if x)
-        if st.result_text:
+            st.result_text = "未修改：" + "\n".join(
+                x for x in (obj.get("reason"), obj.get("why")) if x)
+
+        if st.result_text and not saved:
             st.messages.append({"role": "assistant", "text": st.result_text})
             store.save_session(st.messages)
         self._refresh_cards()
@@ -728,20 +770,53 @@ class ChatPage(NSObject):
         api = self._api()
         if api is None or not st.pending_ops:
             return
-        res = api.apply(st.pending_ops)
+        pending = list(st.pending_ops)
+        res = api.apply(pending)
         if res.ok:
-            lines = ["已应用 %d 项修改：" % len(res.applied)]
+            lines = ["已修改 %d 项（读回验证通过）：" % len(res.applied)]
             for c in res.applied:
                 lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
             st.result_text = "\n".join(lines)
+            st.undo_available = True
         else:
-            msg = "应用失败：" + "；".join(res.errors or ["未知原因"])
+            msg = ["未修改：应用失败" + ("，已回滚到修改前" if res.rolled_back else "")]
+            if res.errors:
+                msg.append("原因：" + "；".join(res.errors))
             if res.rollback_failed:
-                msg += "\n未能回滚：" + "；".join(res.rollback_failed)
+                msg.append("⚠️ 回滚未完成：" + "；".join(res.rollback_failed))
+                msg.append("请在「手势映射」里手动核对以上项目。")
             elif res.rolled_back:
-                msg += "\n已回滚：" + "、".join(res.rolled_back)
-            st.result_text = msg
+                msg.append("已回滚：" + "、".join(res.rolled_back))
+            st.result_text = "\n".join(msg)
+            st.undo_available = False
         st.clear_pending()
+        st.messages.append({"role": "assistant", "text": st.result_text})
+        store.save_session(st.messages)
+        self._refresh_cards()
+
+    def undoClicked_(self, sender):
+        st = self.state
+        api = self._api()
+        if api is None:
+            return
+        res = api.undo_last()
+        if res is None:
+            st.result_text = "撤销：没有可撤销的修改。"
+            st.undo_available = False
+        elif res.ok:
+            lines = ["已撤销 %d 项（读回验证通过）：" % len(res.applied)]
+            for c in res.applied:
+                lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
+            st.result_text = "\n".join(lines)
+            st.undo_available = False
+        else:
+            msg = ["撤销失败，设置未恢复："]
+            if res.errors:
+                msg.append("原因：" + "；".join(res.errors))
+            if res.rollback_failed:
+                msg.append("未能恢复：" + "；".join(res.rollback_failed))
+            st.result_text = "\n".join(msg)
+            st.undo_available = True
         st.messages.append({"role": "assistant", "text": st.result_text})
         store.save_session(st.messages)
         self._refresh_cards()
