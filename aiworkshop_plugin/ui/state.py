@@ -41,6 +41,12 @@ class WorkshopState:
     preview: tuple = ()
     undo_available: bool = False
     undo_txn: str = ""
+    mode: str = "settings"       # settings | plugin
+    draft: dict = field(default_factory=dict)
+    draft_check: dict = field(default_factory=dict)
+    draft_sandbox: dict = field(default_factory=dict)
+    draft_installed: str = ""
+    installing: bool = False
 
     # ------------------------------------------------------------ 派生
     def recent(self, limit=3):
@@ -72,6 +78,12 @@ class WorkshopState:
         self.result_text = text or ""
         self.busy = False
         self.status = ""
+
+    def clear_draft(self):
+        self.draft = {}
+        self.draft_check = {}
+        self.draft_sandbox = {}
+        self.draft_installed = ""
 
     def clear_pending(self):
         self.pending_ops = ()

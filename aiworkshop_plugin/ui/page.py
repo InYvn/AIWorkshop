@@ -14,7 +14,7 @@ import threading
 import objc
 from AppKit import (NSApplication, NSAttributedString, NSButton, NSColor,
                     NSFont, NSImageView, NSImage, NSMakeRect, NSMakeSize,
-                    NSPopUpButton, NSScrollView, NSTextField, NSTextView,
+                    NSPopUpButton, NSScrollView, NSSegmentedControl, NSTextField, NSTextView,
                     NSView, NSLineBreakByWordWrapping,
                     NSFontAttributeName, NSForegroundColorAttributeName,
                     NSImageScaleProportionallyUpOrDown)
@@ -359,9 +359,18 @@ class ChatPage(NSObject):
         # ---- Hero
         doc.addSubview_(_label("想让平板怎样工作？", x, y, cw, 38, size=26, bold=True))
         y += 44
-        doc.addSubview_(_label("描述你的想法，我先分析能否用现有设置实现，还是需要开发新插件。",
+        doc.addSubview_(_label("改设置：用现有接口实现；做插件：生成一个可安装的侧栏插件。",
                                x, y, cw, 18, size=12, color=DIM))
-        y += 30
+        y += 26
+        self._seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(x, y, 168, 26))
+        self._seg.setSegmentCount_(2)
+        self._seg.setLabel_forSegment_("改设置", 0)
+        self._seg.setLabel_forSegment_("做插件", 1)
+        self._seg.setSelectedSegment_(0)
+        self._seg.setTarget_(self)
+        self._seg.setAction_("modeChanged:")
+        doc.addSubview_(self._seg)
+        y += 40
 
         # ---- 输入卡
         ph = 140.0
@@ -395,7 +404,10 @@ class ChatPage(NSObject):
         y += ph + 14
 
         # ---- chips
-        doc.addSubview_(_label("试试", x, y + 4, 40, 16, size=11, color=DIM))
+        self._chips = []
+        chip_label = _label("试试", x, y + 4, 40, 16, size=11, color=DIM)
+        doc.addSubview_(chip_label)
+        self._chips.append(chip_label)
         cx = x + 44
         for i, t in enumerate(("笔手势映射", "手指双击", "截图按钮")):
             b = NSButton.alloc().initWithFrame_(NSMakeRect(cx, y, 96, 26))
@@ -408,6 +420,7 @@ class ChatPage(NSObject):
             b.sizeToFit()
             b.setFrameSize_(NSMakeSize(max(84.0, b.frame().size.width + 20), 26))
             doc.addSubview_(b)
+            self._chips.append(b)
             cx += b.frame().size.width + 8
         y += 44
         self._dynamic_y = y
@@ -483,6 +496,10 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _result_height(self):
+        if self.state.mode == "plugin" and self.state.draft:
+            files = (self.state.draft.get("files") or {})
+            errs = len((self.state.draft_check or {}).get("errors") or [])
+            return 200.0 + 24.0 * min(4, len(files)) + (36.0 if errs else 0.0)
         if self.state.pending_ops and self.state.preview:
             return min(440.0, 150.0 + 26.0 * len(self.state.preview))
         if self.state.result_text or self.state.busy:
@@ -500,12 +517,18 @@ class ChatPage(NSObject):
         pending = bool(self.state.pending_ops and self.state.preview)
         if pending:
             meta = self.state.status or "待确认 · 点右下角应用"
+        elif self.state.mode == "plugin" and self.state.draft:
+            meta = "插件草稿 · 确认后安装"
         elif self.state.undo_available:
             meta = "已应用 · 可撤销"
         else:
             meta = self.state.status or "分析后给出方案 · 确认后生效"
         card.addSubview_(_label(meta, 96, 23, 320, 14, size=10, color=FAINT))
         self._result_view = None
+
+        if self.state.mode == "plugin" and self.state.draft:
+            self._render_draft(card, cw, rh)
+            return
 
         # ---- 待确认：逐项差异（将修改 / 未修改）
         if pending:
@@ -576,6 +599,123 @@ class ChatPage(NSObject):
                                     size=10, color=FAINT))
 
         self._scroll_result_bottom()
+
+    @objc.python_method
+    def _render_draft(self, card, cw, rh):
+        from ..gen import draft as D
+        st = self.state
+        check = st.draft_check or {}
+        files = st.draft.get("files") or {}
+        card.addSubview_(_label(st.draft.get("summary") or "插件草稿", 20, 46, cw - 40, 20,
+                                size=13, bold=True))
+        ok = bool(check.get("ok"))
+        status = "静态校验通过" if ok else ("%d 个问题" % len(check.get("errors") or []))
+        card.addSubview_(_label(status, 20, 70, 200, 16, size=10.5,
+                                color=GREEN if ok else NSColor.systemRedColor()))
+        if st.draft_sandbox:
+            sb = st.draft_sandbox
+            card.addSubview_(_label("沙箱试运行：" + ("通过" if sb.get("ok") else "失败"),
+                                    150, 70, 240, 16, size=10.5,
+                                    color=GREEN if sb.get("ok") else NSColor.systemRedColor()))
+        ry = 94.0
+        for path in list(files)[:4]:
+            text = files.get(path) or ""
+            card.addSubview_(_label(path, 20, ry, cw - 220, 16, size=11))
+            card.addSubview_(_label("%d 字节" % len(text), cw - 190, ry, 80, 16,
+                                    size=10, color=FAINT, align=2))
+            ry += 24
+        errs = check.get("errors") or []
+        if errs:
+            card.addSubview_(_label("· " + errs[0][:96], 20, ry + 2, cw - 40, 16,
+                                    size=10, color=NSColor.systemRedColor()))
+            ry += 22
+        if st.draft_installed:
+            card.addSubview_(_label("已安装 %s · 重启 App 后出现在左侧栏" % st.draft_installed,
+                                    20, rh - 38, cw - 240, 16, size=10.5, color=GREEN))
+        elif st.installing:
+            card.addSubview_(_label("正在沙箱试运行并安装…", 20, rh - 38, cw - 240, 16,
+                                    size=10.5, color=DIM))
+
+        bw = 116.0
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - bw - 20, rh - 42, bw, 30))
+        btn.setBordered_(False)
+        btn.setWantsLayer_(True)
+        btn.layer().setBackgroundColor_((ACCENT if ok else ACCENT.colorWithAlphaComponent_(0.38)).CGColor())
+        btn.layer().setCornerRadius_(15.0)
+        btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+            "安装插件", {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.0),
+                      NSForegroundColorAttributeName: NSColor.whiteColor()}))
+        btn.setEnabled_(ok and not st.installing and not st.draft_installed)
+        btn.setTarget_(self)
+        btn.setAction_("installDraftClicked:")
+        card.addSubview_(btn)
+
+        ob = NSButton.alloc().initWithFrame_(NSMakeRect(cw - bw - 132, rh - 42, 104, 28))
+        ob.setTitle_("草稿目录")
+        ob.setBezelStyle_(1)
+        ob.setFont_(NSFont.systemFontOfSize_(11.5))
+        ob.setTarget_(self)
+        ob.setAction_("revealDraftClicked:")
+        card.addSubview_(ob)
+
+    def modeChanged_(self, sender):
+        self.state.mode = "plugin" if sender.selectedSegment() == 1 else "settings"
+        self._apply_mode()
+
+    @objc.python_method
+    def _apply_mode(self):
+        plugin = self.state.mode == "plugin"
+        try:
+            self._placeholder.setStringValue_(
+                "描述你想要的插件，比如：一个一键切成笔模式的页面" if plugin
+                else "把触控笔轻点改成右键")
+            for v in getattr(self, "_chips", []):
+                v.setHidden_(plugin)
+        except Exception:
+            pass
+        self.state.clear_draft()
+        self.state.clear_pending()
+        self.state.result_text = ""
+        self.state.undo_available = False
+        self._refresh_cards()
+
+    def installDraftClicked_(self, sender):
+        st = self.state
+        if st.installing or not st.draft:
+            return
+        st.installing = True
+        st.status = "正在试运行…"
+        self._refresh_cards()
+        threading.Thread(target=self._install_worker, args=(dict(st.draft),),
+                         daemon=True).start()
+
+    @objc.python_method
+    def _install_worker(self, draft_obj):
+        from ..gen import draft as D, sandbox
+        try:
+            files = draft_obj.get("files") or {}
+            meta = json.loads(files.get("plugin.json") or "{}")
+            pid = str(meta.get("id") or "")
+            entry = str(meta.get("entry") or (pid + "_plugin"))
+            d = D.write_draft(pid, files)
+            sb = sandbox.run(d, entry)
+            if not sb.get("ok"):
+                self._q.put(("draft_done", (sb, None, pid)))
+                return
+            rec = D.install(pid, D.zip_draft(pid))
+            self._q.put(("draft_done", (sb, rec, pid)))
+        except Exception as e:
+            self._q.put(("draft_done", ({"ok": False, "output": repr(e)}, None, "")))
+
+    def revealDraftClicked_(self, sender):
+        from AppKit import NSWorkspace
+        from ..gen import draft as D
+        try:
+            meta = json.loads((self.state.draft.get("files") or {}).get("plugin.json") or "{}")
+            d = D.draft_dir(str(meta.get("id") or "draft"))
+            NSWorkspace.sharedWorkspace().openFile_(d)
+        except Exception:
+            pass
 
     @objc.python_method
     def _scroll_result_bottom(self):
@@ -679,6 +819,19 @@ class ChatPage(NSObject):
                 break
             if isinstance(item, tuple):
                 kind, payload = item
+                if kind == "draft_done":
+                    sb, rec, pid = payload
+                    self.state.draft_sandbox = sb
+                    self.state.installing = False
+                    self.state.status = ""
+                    if rec:
+                        self.state.draft_installed = "%s %s" % (pid, rec.get("version"))
+                        self.state.result_text = ""
+                    else:
+                        self.state.result_text = ("未安装：沙箱试运行未通过。\n"
+                                                  + str(sb.get("output") or "")[-400:])
+                    self._refresh_cards()
+                    continue
                 if kind == "models":
                     pid, models = payload
                     if pid == self.state.provider:
@@ -712,6 +865,14 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _system_prompt(self):
+        if self.state.mode == "plugin":
+            from ..gen import contract
+            prompt = contract.SYSTEM_PROMPT
+            draft = self.state.draft or {}
+            if draft.get("files"):
+                prompt += ("\n\n当前草稿（用户要求修改时，基于这些文件改，返回完整文件）：\n"
+                           + json.dumps(draft["files"], ensure_ascii=False))
+            return prompt
         api = self._api()
         ctx = api.context_text() if api else "（宿主没有提供设置接口：只能解释，不能改设置）"
         return "你是 Mipad DP Touch 的设置助手。\n\n" + ctx
@@ -721,6 +882,9 @@ class ChatPage(NSObject):
         st = self.state
         text = (st.result_text or "").strip()
         obj = _extract_json(text)
+        if st.mode == "plugin":
+            self._finish_plugin_reply(obj, text)
+            return
         api = self._api()
         saved = False
 
@@ -762,6 +926,26 @@ class ChatPage(NSObject):
 
         if st.result_text and not saved:
             st.messages.append({"role": "assistant", "text": st.result_text})
+            store.save_session(st.messages)
+        self._refresh_cards()
+
+    @objc.python_method
+    def _finish_plugin_reply(self, obj, text):
+        from ..gen import validate
+        st = self.state
+        if not (obj and obj.get("type") == "plugin_draft"
+                and isinstance(obj.get("files"), dict)):
+            st.result_text = ("未生成插件：模型没有按协议返回 plugin_draft。\n\n"
+                              + text[:400])
+        else:
+            res = validate.validate(obj["files"])
+            st.draft = {"summary": obj.get("summary") or "", "files": obj["files"]}
+            st.draft_check = res
+            st.draft_sandbox = {}
+            st.draft_installed = ""
+            st.result_text = ""
+            st.messages.append({"role": "assistant",
+                                "text": "插件草稿：" + (obj.get("summary") or "")})
             store.save_session(st.messages)
         self._refresh_cards()
 
