@@ -19,7 +19,7 @@ class Request:
     provider: str
     model: str
     messages: Tuple[Tuple[str, str], ...]
-    max_tokens: int = 1600
+    max_tokens: int = 3000
     cancel: Any = None
 
     def as_payload(self):
@@ -59,7 +59,7 @@ class WorkshopState:
             if m.get("role") in ("user", "assistant") and m.get("text"):
                 msgs.append((m["role"], m["text"]))
         return Request(provider=self.provider, model=self.model,
-                       messages=tuple(msgs), max_tokens=1600, cancel=cancel)
+                       messages=tuple(msgs), max_tokens=3000, cancel=cancel)
 
     # ------------------------------------------------------------ 变更
     def begin(self, text):

@@ -400,7 +400,7 @@ class ChatPage(NSObject):
         doc.addSubview_(chip_label)
         self._chips.append(chip_label)
         cx = x + 44
-        for i, t in enumerate(("笔手势映射", "手指双击", "截图按钮")):
+        for i, t in enumerate(("笔手势映射", "手指双击", "做个笔模式面板")):
             b = NSButton.alloc().initWithFrame_(NSMakeRect(cx, y, 96, 26))
             b.setTitle_(t)
             b.setBezelStyle_(1)
@@ -735,7 +735,7 @@ class ChatPage(NSObject):
         return False
 
     def chipClicked_(self, sender):
-        texts = ("把笔的轻点改成右键", "让手指双击变成一次左键单击", "做一个截图按钮插件")
+        texts = ("把笔的轻点改成右键", "让手指双击变成一次左键单击", "做一个一键切成笔模式的插件页面")
         i = max(0, min(int(sender.tag()), len(texts) - 1))
         self._tv.setString_(texts[i])
         self.state.input_text = texts[i]
@@ -861,6 +861,14 @@ class ChatPage(NSObject):
         st = self.state
         text = (st.result_text or "").strip()
         obj = _extract_json(text)
+        if not text:
+            st.result_text = ("模型没有返回内容（可能把预算都花在推理上了）。\n"
+                              "可以在右上角设置里换一个模型，例如 "
+                              "nvidia/nemotron-3-ultra-550b-a55b:free。")
+            st.messages.append({"role": "assistant", "text": st.result_text})
+            store.save_session(st.messages)
+            self._refresh_cards()
+            return
         if obj and obj.get("type") == "plugin_draft":
             self._finish_plugin_reply(obj, text)
             return
@@ -1045,7 +1053,14 @@ class ChatPage(NSObject):
         titles = [m.id for m in models[:20]] or ["Kilo 免费"]
         for t in titles:
             self._model.addItemWithTitle_(t)
-        want = self.state.model or "kilo-auto/free"
+        want = self.state.model
+        if not want:
+            pref = ("nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "cohere/north-mini-code:free", "kilo-auto/free")
+            for p in pref:
+                if p in titles:
+                    want = p
+                    break
         i = self._model.indexOfItemWithTitle_(want)
         if i >= 0:
             self._model.selectItemAtIndex_(i)
