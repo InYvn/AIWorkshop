@@ -197,7 +197,7 @@ class SettingsSheet(NSObject):
         provs[pid] = {"base": base, "model": model}
         store.save_config(self.chat.cfg)
         self.chat.client.invalidate(pid)
-        self.chat._load_models_async()
+        self.chat.set_provider_model(pid, model)
         self._close()
 
     def cancelClicked_(self, sender):

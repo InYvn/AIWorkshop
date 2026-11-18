@@ -22,6 +22,7 @@ from Foundation import NSObject, NSTimer
 
 from .. import store
 from ..llm import LLMClient, LLMError
+from .state import Request, WorkshopState
 
 W_MAX = 760.0
 PAD = 32.0
@@ -253,22 +254,25 @@ class ChatPage(NSObject):
             if k:
                 provs[pid]["key"] = k
         self.client = LLMClient(provs)
-        self.messages = store.load_session("default")
-        self._busy = False
+        pid = self.cfg.get("provider") or "kilo"
+        if pid not in self.client.provider_ids():
+            pid = "kilo"
+        self.state = WorkshopState(provider=pid,
+                                   model=str(self.cfg.get("model") or ""),
+                                   messages=store.load_session("default"))
         self._cancel = threading.Event()
         self._q = queue.Queue()
         self._timer = None
         self._doc = None
         self._w = 0.0
         self._h = 0.0
-        self._result_text = ""
         self._result_view = None
-        self._models = []
         self._settings = None
-        self._pending_ops = None
-        self._preview = []
-        self._summary = ""
-        self._status = ""
+        self._result_card = None
+        self._recent_title = None
+        self._recent_count = None
+        self._recent_box = None
+        self._built = False
         return self
 
     # ------------------------------------------------------------ 页面
@@ -288,14 +292,18 @@ class ChatPage(NSObject):
         self._doc = _Doc.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
         self._scroll.setDocumentView_(self._doc)
         box.addSubview_(self._scroll)
-        self._layout_page()
+        self._build_page()
         self._load_models_async()
         if self._timer is None:
             self._timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.05, self, "drain:", None, True)
 
     @objc.python_method
-    def _layout_page(self):
+    def _build_page(self):
+        """静态骨架只建一次：品牌行 / 标题 / 输入卡 / chips。"""
+        if self._built:
+            return
+        self._built = True
         doc = self._doc
         for v in list(doc.subviews()):
             v.removeFromSuperview()
@@ -394,29 +402,57 @@ class ChatPage(NSObject):
             doc.addSubview_(b)
             cx += b.frame().size.width + 8
         y += 44
+        self._dynamic_y = y
+        self._refresh_cards()
 
-        # ---- 建议方案
+    @objc.python_method
+    def _refresh_cards(self):
+        """只重建会变的卡片（建议方案 / 最近的想法），输入区与模型选择器不动。"""
+        doc = self._doc
+        for v in (self._result_card, self._recent_title, self._recent_count,
+                  self._recent_box):
+            if v is not None:
+                try:
+                    v.removeFromSuperview()
+                except Exception:
+                    pass
+        self._result_card = None
+        self._recent_title = None
+        self._recent_count = None
+        self._recent_box = None
+
+        w = self._w
+        cw = min(W_MAX, w - 2 * PAD)
+        x = (w - cw) / 2.0
+        y = self._dynamic_y
+
         doc.addSubview_(_label("建议方案", x, y, 200, 20, size=14, bold=True))
         doc.addSubview_(_label("模型给出方案 · 确认后应用", x + cw - 220, y + 3, 220, 14,
                                size=10, color=FAINT, align=2))
         y += 28
         rh = self._result_height()
-        card2 = _card(doc, x, y, cw, rh)
-        self._render_result(card2, cw, rh)
+        card = _card(doc, x, y, cw, rh)
+        self._result_card = card
+        self._render_result(card, cw, rh)
         y += rh + 26
 
-        # ---- 最近的想法
-        recent = [m for m in self.messages if m.get("role") == "user"][-3:]
-        doc.addSubview_(_label("最近的想法", x, y, 200, 20, size=14, bold=True))
-        doc.addSubview_(_label("%d 条" % len(recent), x + cw - 60, y + 3, 60, 14,
-                               size=10, color=FAINT, align=2))
+        recent = self.state.recent(3)
+        self._recent_title = _label("最近的想法", x, y, 200, 20, size=14, bold=True)
+        doc.addSubview_(self._recent_title)
+        self._recent_count = _label("%d 条" % len(recent), x + cw - 60, y + 3, 60, 14,
+                                    size=10, color=FAINT, align=2)
+        doc.addSubview_(self._recent_count)
         y += 28
+        box = NSView.alloc().initWithFrame_(NSMakeRect(x, y, cw, 1))
+        self._recent_box = box
+        doc.addSubview_(box)
+        by = 0.0
         if not recent:
-            doc.addSubview_(_label("还没有想法。上面写一句，回车或点「分析想法」。",
-                                   x, y, cw, 18, size=11, color=FAINT))
-            y += 28
+            box.addSubview_(_label("还没有想法。上面写一句，回车或点「分析想法」。",
+                                   0, 0, cw, 18, size=11, color=FAINT))
+            by += 28
         for m in reversed(recent):
-            row = _card(doc, x, y, cw, 56, radius=10)
+            row = _card(box, 0, by, cw, 56, radius=10)
             ic = NSImageView.alloc().initWithFrame_(NSMakeRect(16, 19, 18, 18))
             img = _symbol("bolt", 14)
             if img is not None:
@@ -432,16 +468,16 @@ class ChatPage(NSObject):
                 chev.setImage_(cimg)
                 chev.setContentTintColor_(FAINT)
             row.addSubview_(chev)
-            y += 64
-
-        y += 30
+            by += 64
+        box.setFrameSize_(NSMakeSize(cw, by))
+        y += by + 30
         doc.setFrameSize_(NSMakeSize(w, max(y, self._h)))
 
     @objc.python_method
     def _result_height(self):
-        if self._pending_ops and self._preview:
-            return min(420.0, 120.0 + 26.0 * len(self._preview))
-        if self._result_text or self._busy:
+        if self.state.pending_ops and self.state.preview:
+            return min(420.0, 120.0 + 26.0 * len(self.state.preview))
+        if self.state.result_text or self.state.busy:
             return 240.0
         return 96.0
 
@@ -453,15 +489,16 @@ class ChatPage(NSObject):
         tag_bg.layer().setCornerRadius_(6.0)
         card.addSubview_(tag_bg)
         card.addSubview_(_label("AI 分析", 30, 22, 56, 14, size=10, color=GREEN))
-        meta = self._status or ("待确认 · 点右下角应用" if self._pending_ops else "分析后给出方案 · 确认后生效")
+        meta = self.state.status or ("待确认 · 点右下角应用" if self.state.pending_ops
+                                     else "分析后给出方案 · 确认后生效")
         card.addSubview_(_label(meta, 96, 23, 300, 14, size=10, color=FAINT))
 
         # 待确认的方案：摘要 + 逐项差异 + 应用按钮
-        if self._pending_ops and self._preview:
-            card.addSubview_(_label(self._summary or "建议修改", 20, 50, cw - 40, 20,
+        if self.state.pending_ops and self.state.preview:
+            card.addSubview_(_label(self.state.summary or "建议修改", 20, 50, cw - 40, 20,
                                     size=13, bold=True))
             ry = 78.0
-            for c in self._preview:
+            for c in self.state.preview:
                 old, new = _show(c.old), _show(c.new)
                 card.addSubview_(_label("%s：%s → %s" % (c.title, old, new),
                                         20, ry, cw - 160, 18, size=11.5))
@@ -491,11 +528,12 @@ class ChatPage(NSObject):
         tv.setTextColor_(TEXT)
         tv.setVerticallyResizable_(True)
         tv.textContainer().setWidthTracksTextView_(True)
-        tv.setString_(self._result_text or (self._status or "还没有分析结果。写一句想法，点「分析想法」。"))
+        tv.setString_(self.state.result_text
+                      or (self.state.status or "还没有分析结果。写一句想法，点「分析想法」。"))
         card.addSubview_(tv)
         self._result_view = tv
 
-        if not self._result_text:
+        if not self.state.result_text:
             tv.setTextColor_(FAINT)
         self._scroll_result_bottom()
 
@@ -519,7 +557,9 @@ class ChatPage(NSObject):
     # ------------------------------------------------------------ 输入
     def textDidChange_(self, note):
         try:
-            has = bool(str(self._tv.string() or "").strip())
+            text = str(self._tv.string() or "")
+            self.state.input_text = text
+            has = bool(text.strip())
             self._placeholder.setHidden_(has)
             self._update_send(has)
         except Exception:
@@ -548,14 +588,16 @@ class ChatPage(NSObject):
         texts = ("把笔的轻点改成右键", "让手指双击变成一次左键单击", "做一个截图按钮插件")
         i = max(0, min(int(sender.tag()), len(texts) - 1))
         self._tv.setString_(texts[i])
+        self.state.input_text = texts[i]
         self._placeholder.setHidden_(True)
+        self._update_send(True)
 
     def sendClicked_(self, sender):
         self._submit()
 
     @objc.python_method
     def _submit(self):
-        if self._busy:
+        if self.state.busy:
             return
         text = str(self._tv.string() or "").strip()
         if not text:
@@ -563,30 +605,23 @@ class ChatPage(NSObject):
         self._tv.setString_("")
         self._placeholder.setHidden_(False)
         self._update_send(False)
-        self.messages.append({"role": "user", "text": text})
-        store.save_session(self.messages)
-        self._result_text = ""
-        self._pending_ops = None
-        self._preview = []
-        self._summary = ""
-        self._busy = True
-        self._status = "正在分析…"
+
+        # 主线程：写状态 → 生成快照；后台线程之后只读快照
+        self.state.begin(text)
+        store.save_session(self.state.messages)
         self._cancel.clear()
-        self._layout_page()
+        req = self.state.build_request(self._system_prompt(), self._cancel)
+
+        self._refresh_cards()
         self._scroll_page_top()
-        threading.Thread(target=self._worker, args=(text,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(req,), daemon=True).start()
 
     @objc.python_method
-    def _worker(self, text):
-        msgs = [{"role": "system", "content": self._system_prompt()}]
-        for m in self.messages[-20:]:
-            if m.get("role") in ("user", "assistant") and m.get("text"):
-                msgs.append({"role": m["role"], "content": m["text"]})
-        if not msgs or msgs[-1].get("role") != "user":
-            msgs.append({"role": "user", "content": text})
+    def _worker(self, req):
+        # 后台线程：不碰任何控件，不读 self.state
         try:
-            for ch in self.client.stream(self._provider(), self._model_id(),
-                                         msgs, max_tokens=1600, cancel=self._cancel):
+            for ch in self.client.stream(req.provider, req.model, req.as_payload(),
+                                         max_tokens=req.max_tokens, cancel=req.cancel):
                 self._q.put(ch)
         except LLMError as e:
             self._q.put(("error", e.user_text()))
@@ -605,24 +640,26 @@ class ChatPage(NSObject):
             if isinstance(item, tuple):
                 kind, payload = item
                 if kind == "models":
-                    self._fill_models(payload)
+                    pid, models = payload
+                    if pid == self.state.provider:
+                        self._fill_models(models)
                     continue
                 if kind == "models_error":
                     continue
                 if kind == "error":
-                    self._result_text += ("\n\n⚠️ " + str(payload))
+                    self.state.result_text += ("\n\n⚠️ " + str(payload))
                     changed = True
                 elif kind == "done":
-                    self._busy = False
-                    self._status = ""
+                    self.state.busy = False
+                    self.state.status = ""
                     self._finish_reply()
                 continue
             if getattr(item, "type", "") == "content":
-                self._result_text += item.text
+                self.state.result_text += item.text
                 changed = True
         if changed and self._result_view is not None:
             self._result_view.setTextColor_(TEXT)
-            self._result_view.setString_(self._result_text)
+            self._result_view.setString_(self.state.result_text)
             self._scroll_result_bottom()
 
     @objc.python_method
@@ -641,7 +678,8 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _finish_reply(self):
-        text = (self._result_text or "").strip()
+        st = self.state
+        text = (st.result_text or "").strip()
         obj = _extract_json(text)
         api = self._api()
         if obj and obj.get("type") == "settings_change" and isinstance(obj.get("operations"), list):
@@ -649,71 +687,79 @@ class ChatPage(NSObject):
             manifest = api0.manifest() if api0 else []
             ops = _repair_ops(obj["operations"], manifest)
             if ops is None or not _valid_ops(ops):
-                self._result_text = ("模型给的方案格式不对，无法应用。\n\n原始回复：\n"
-                                     + text[:600])
-                self.messages.append({"role": "assistant", "text": self._result_text})
-                store.save_session(self.messages)
-                self._layout_page()
+                st.result_text = ("模型给的方案格式不对，无法应用。\n\n原始回复：\n"
+                                  + text[:600])
+                st.messages.append({"role": "assistant", "text": st.result_text})
+                store.save_session(st.messages)
+                self._refresh_cards()
                 return
             if api is None:
-                self._result_text = "这个方案需要改设置，但当前宿主没有提供设置接口。"
+                st.result_text = "这个方案需要改设置，但当前宿主没有提供设置接口。"
             else:
                 try:
-                    self._preview = api.preview(ops)
-                    self._pending_ops = ops
-                    self._summary = obj.get("summary") or ""
-                    self._result_text = ""
+                    st.preview = tuple(api.preview(tuple(ops)))
+                    st.pending_ops = tuple(ops)
+                    st.summary = obj.get("summary") or ""
+                    st.result_text = ""
+                    st.messages.append({"role": "assistant",
+                                        "text": "建议修改：" + (st.summary or "（已生成方案）")})
+                    store.save_session(st.messages)
                 except Exception as e:
-                    self._result_text = "方案无法应用：%r" % (e,)
+                    st.result_text = "方案无法应用：%r" % (e,)
         elif obj and obj.get("type") == "answer":
-            self._result_text = obj.get("text") or text
+            st.result_text = obj.get("text") or text
         elif obj and obj.get("type") == "unsupported":
-            self._result_text = "\n".join(x for x in (obj.get("reason"), obj.get("why")) if x)
-        if self._result_text:
-            self.messages.append({"role": "assistant", "text": self._result_text})
-            store.save_session(self.messages)
-        self._layout_page()
+            st.result_text = "\n".join(x for x in (obj.get("reason"), obj.get("why")) if x)
+        if st.result_text:
+            st.messages.append({"role": "assistant", "text": st.result_text})
+            store.save_session(st.messages)
+        self._refresh_cards()
 
     def applyClicked_(self, sender):
+        st = self.state
         api = self._api()
-        if api is None or not self._pending_ops:
+        if api is None or not st.pending_ops:
             return
-        res = api.apply(self._pending_ops)
+        res = api.apply(st.pending_ops)
         if res.ok:
             lines = ["已应用 %d 项修改：" % len(res.applied)]
             for c in res.applied:
                 lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
-            self._result_text = "\n".join(lines)
+            st.result_text = "\n".join(lines)
         else:
             msg = "应用失败：" + "；".join(res.errors or ["未知原因"])
             if res.rollback_failed:
                 msg += "\n未能回滚：" + "；".join(res.rollback_failed)
             elif res.rolled_back:
                 msg += "\n已回滚：" + "、".join(res.rolled_back)
-            self._result_text = msg
-        self._pending_ops = None
-        self._preview = []
-        self._summary = ""
-        self.messages.append({"role": "assistant", "text": self._result_text})
-        store.save_session(self.messages)
-        self._layout_page()
+            st.result_text = msg
+        st.clear_pending()
+        st.messages.append({"role": "assistant", "text": st.result_text})
+        store.save_session(st.messages)
+        self._refresh_cards()
 
     @objc.python_method
     def _provider(self):
-        pid = self.cfg.get("provider") or "kilo"
+        pid = self.state.provider or "kilo"
         return pid if pid in self.client.provider_ids() else "kilo"
 
     @objc.python_method
     def _model_id(self):
-        try:
-            t = str(self._model.titleOfSelectedItem() or "")
-            return "" if t in ("Kilo 免费", "加载中…") else t
-        except Exception:
-            return ""
+        return self.state.model or ""
 
     def modelChanged_(self, sender):
-        self.cfg["model"] = self._model_id()
+        t = str(self._model.titleOfSelectedItem() or "")
+        self.state.model = "" if t in ("Kilo 免费", "加载中…") else t
+        self.cfg["model"] = self.state.model
         store.save_config(self.cfg)
+
+    @objc.python_method
+    def set_provider_model(self, pid, model):
+        """设置面板保存后回写状态（面板不直接改页面字段）。"""
+        self.state.provider = pid
+        if model is not None:
+            self.state.model = model or ""
+        self._load_models_async()
 
     def openSettings_(self, sender):
         try:
@@ -722,26 +768,30 @@ class ChatPage(NSObject):
                 self._settings = SettingsSheet.alloc().init()
             self._settings.present(self)
         except Exception as e:
-            self._result_text = "打开设置失败：%r" % (e,)
-            self._layout_page()
+            self.state.result_text = "打开设置失败：%r" % (e,)
+            self._refresh_cards()
 
     @objc.python_method
     def _load_models_async(self):
+        pid = self._provider()
+        client = self.client
+
         def run():
             try:
-                self._q.put(("models", self.client.list_models(self._provider(), force=True)))
+                self._q.put(("models", (pid, client.list_models(pid, force=True))))
             except Exception:
                 pass
         threading.Thread(target=run, daemon=True).start()
 
     @objc.python_method
     def _fill_models(self, models):
-        self._models = models
+        self.state.models = tuple(models)
         self._model.removeAllItems()
         titles = [m.id for m in models[:20]] or ["Kilo 免费"]
         for t in titles:
             self._model.addItemWithTitle_(t)
-        want = self.cfg.get("model") or "kilo-auto/free"
+        want = self.state.model or "kilo-auto/free"
         i = self._model.indexOfItemWithTitle_(want)
         if i >= 0:
             self._model.selectItemAtIndex_(i)
+            self.state.model = want
