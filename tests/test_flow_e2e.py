@@ -104,18 +104,30 @@ def run():
     ck("执行后才改", bridge.app.cfg["bind_tap"] == "right")
     ck("反馈已修改", page.state.result_text.startswith("已修改"), page.state.result_text[:40])
     ck("出现撤销", page.state.undo_available)
+    ck("撤销绑定事务", bool(page.state.undo_txn)
+       and page.state.undo_txn == (bridge.undoable() or {}).get("txn"))
 
     # 3) 已经是目标值 → 明确“未修改”（撤销前测，才处于已应用状态）
     ask("再设一次右键")
     ck("不生成待确认", not page.state.pending_ops)
     ck("反馈未修改", page.state.result_text.startswith("未修改"), page.state.result_text[:40])
 
-    # 4) 撤销 → 恢复并读回
+    # 4) 撤销失败 → 保留同一事务 → 重试成功
+    tx = page.state.undo_txn
+    real_bind = AIS._FakeApp.set_bind.__get__(bridge.app)
+    bridge.app.set_bind = lambda g, a: None          # 撤销也会失败
     page.undoClicked_(None)
     pump(0.1)
-    ck("撤销恢复", bridge.app.cfg["bind_tap"] == "left")
+    ck("失败后按钮还在", page.state.undo_available)
+    ck("失败后事务不变", page.state.undo_txn == tx)
+    ck("失败后未恢复", bridge.app.cfg["bind_tap"] == "right")
+    bridge.app.set_bind = real_bind
+    page.undoClicked_(None)
+    pump(0.1)
+    ck("重试撤销成功", bridge.app.cfg["bind_tap"] == "left")
     ck("反馈已撤销", page.state.result_text.startswith("已撤销"), page.state.result_text[:40])
     ck("撤销按钮收起", not page.state.undo_available)
+    ck("撤销后事务清空", page.state.undo_txn == "")
 
     # 5) 失败 → 回滚 → 未修改
     bridge.app.set_gain = lambda g: None       # 模拟 setter 静默不生效

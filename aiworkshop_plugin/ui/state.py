@@ -40,6 +40,7 @@ class WorkshopState:
     pending_ops: tuple = ()
     preview: tuple = ()
     undo_available: bool = False
+    undo_txn: str = ""
 
     # ------------------------------------------------------------ 派生
     def recent(self, limit=3):

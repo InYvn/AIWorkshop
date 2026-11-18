@@ -778,6 +778,7 @@ class ChatPage(NSObject):
                 lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
             st.result_text = "\n".join(lines)
             st.undo_available = True
+            st.undo_txn = res.txn
         else:
             msg = ["未修改：应用失败" + ("，已回滚到修改前" if res.rolled_back else "")]
             if res.errors:
@@ -789,6 +790,7 @@ class ChatPage(NSObject):
                 msg.append("已回滚：" + "、".join(res.rolled_back))
             st.result_text = "\n".join(msg)
             st.undo_available = False
+            st.undo_txn = ""
         st.clear_pending()
         st.messages.append({"role": "assistant", "text": st.result_text})
         store.save_session(st.messages)
@@ -799,16 +801,23 @@ class ChatPage(NSObject):
         api = self._api()
         if api is None:
             return
-        res = api.undo_last()
+        txn = st.undo_txn
+        # 绑定明确事务；旧宿主没有 undo(txn) 时退回 undo_last()
+        if txn and hasattr(api, "undo"):
+            res = api.undo(txn)
+        else:
+            res = api.undo_last()
         if res is None:
             st.result_text = "撤销：没有可撤销的修改。"
             st.undo_available = False
+            st.undo_txn = ""
         elif res.ok:
             lines = ["已撤销 %d 项（读回验证通过）：" % len(res.applied)]
             for c in res.applied:
                 lines.append("· %s：%s → %s" % (c.title, _show(c.old), _show(c.new)))
             st.result_text = "\n".join(lines)
             st.undo_available = False
+            st.undo_txn = ""
         else:
             msg = ["撤销失败，设置未恢复："]
             if res.errors:
