@@ -46,17 +46,32 @@ def main():
     import aiworkshop_plugin.ui.page as P
     from aiworkshop_plugin.gen import contract
 
+    class _Change:
+        def __init__(self, title, old, new):
+            self.key = "bind_tap"
+            self.title, self.old, self.new = title, old, new
+            self.warn = ""
+            self.implicit = False
+
+    class _API:
+        def context_text(self):
+            return "可改设置：笔 · 轻点"
+
+        def manifest(self):
+            return [{"op": "set_bind", "gesture": "tap", "title": "笔 · 轻点",
+                     "values": ["left", "right"], "current": "left"}]
+
+        def preview(self, ops):
+            return [_Change("笔 · 轻点", "left", "right")]
+
     class Host:
-        settings_api = None
+        settings_api = _API()
 
     PLUG.set_host(Host())
 
     page = P.ChatPage.alloc().init()
     box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 980, 700))
     page.render(box, 980, 700)
-    page._seg.setSelectedSegment_(1)
-    page.modeChanged_(page._seg)
-    ck("切到做插件", page.state.mode == "plugin")
 
     manifest = {"id": "quick_mode", "name": "快速切换", "blurb": "一键切成笔模式",
                 "version": "0.1.0", "min_host": "2.2.5", "api": 1,
@@ -100,6 +115,20 @@ def main():
     ck("宿主发现本地插件", "quick_mode" in PLUG.local_plugins())
     ck("侧栏页可见", any(pid == "quick_mode" for pid, _m in PLUG.page_plugins()))
     ck("入口可解析", PLUG.get("quick_mode")["entry"] == "quick_mode_plugin")
+
+    # 不需要切换模式：同一输入框里再来一条“改设置”请求
+    class FakeSettings(Fake):
+        def stream(self, *a, **k):
+            from aiworkshop_plugin.llm.types import Chunk
+            yield Chunk.content('{"type":"settings_change","summary":"笔轻点改右键",'
+                                '"operations":[{"op":"set_bind","gesture":"tap","action":"right"}]}')
+
+    page.client = FakeSettings()
+    page._tv.setString_("把笔的轻点改成右键")
+    page._submit()
+    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.9))
+    ck("自动切到设置方案", bool(page.state.pending_ops) and not page.state.draft,
+       "%r / %r" % (page.state.pending_ops, page.state.draft))
 
     PLUG.uninstall("quick_mode")
     ck("卸载后不再出现", "quick_mode" not in PLUG.local_plugins())

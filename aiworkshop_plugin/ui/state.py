@@ -41,7 +41,6 @@ class WorkshopState:
     preview: tuple = ()
     undo_available: bool = False
     undo_txn: str = ""
-    mode: str = "settings"       # settings | plugin
     draft: dict = field(default_factory=dict)
     draft_check: dict = field(default_factory=dict)
     draft_sandbox: dict = field(default_factory=dict)

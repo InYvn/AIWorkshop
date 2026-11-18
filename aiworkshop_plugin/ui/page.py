@@ -359,17 +359,8 @@ class ChatPage(NSObject):
         # ---- Hero
         doc.addSubview_(_label("想让平板怎样工作？", x, y, cw, 38, size=26, bold=True))
         y += 44
-        doc.addSubview_(_label("改设置：用现有接口实现；做插件：生成一个可安装的侧栏插件。",
+        doc.addSubview_(_label("描述你的想法：现有设置能实现就直接改，做不到就生成一个插件。",
                                x, y, cw, 18, size=12, color=DIM))
-        y += 26
-        self._seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(x, y, 168, 26))
-        self._seg.setSegmentCount_(2)
-        self._seg.setLabel_forSegment_("改设置", 0)
-        self._seg.setLabel_forSegment_("做插件", 1)
-        self._seg.setSelectedSegment_(0)
-        self._seg.setTarget_(self)
-        self._seg.setAction_("modeChanged:")
-        doc.addSubview_(self._seg)
         y += 40
 
         # ---- 输入卡
@@ -383,7 +374,7 @@ class ChatPage(NSObject):
         self._tv.textContainer().setWidthTracksTextView_(True)
         self._tv.setDelegate_(self)
         card.addSubview_(self._tv)
-        self._placeholder = _label("把触控笔轻点改成右键", 24, 16, cw - 48, 20,
+        self._placeholder = _label("把触控笔轻点改成右键，或做一个截图按钮插件", 24, 16, cw - 48, 20,
                                    size=14, color=FAINT)
         card.addSubview_(self._placeholder)
         card.addSubview_(_label("⏎  /  Ctrl + Enter 分析", 20, ph - 30, 240, 16,
@@ -496,7 +487,7 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _result_height(self):
-        if self.state.mode == "plugin" and self.state.draft:
+        if self.state.draft:
             files = (self.state.draft.get("files") or {})
             errs = len((self.state.draft_check or {}).get("errors") or [])
             return 200.0 + 24.0 * min(4, len(files)) + (36.0 if errs else 0.0)
@@ -517,7 +508,7 @@ class ChatPage(NSObject):
         pending = bool(self.state.pending_ops and self.state.preview)
         if pending:
             meta = self.state.status or "待确认 · 点右下角应用"
-        elif self.state.mode == "plugin" and self.state.draft:
+        elif self.state.draft:
             meta = "插件草稿 · 确认后安装"
         elif self.state.undo_available:
             meta = "已应用 · 可撤销"
@@ -526,7 +517,7 @@ class ChatPage(NSObject):
         card.addSubview_(_label(meta, 96, 23, 320, 14, size=10, color=FAINT))
         self._result_view = None
 
-        if self.state.mode == "plugin" and self.state.draft:
+        if self.state.draft:
             self._render_draft(card, cw, rh)
             return
 
@@ -658,27 +649,6 @@ class ChatPage(NSObject):
         ob.setAction_("revealDraftClicked:")
         card.addSubview_(ob)
 
-    def modeChanged_(self, sender):
-        self.state.mode = "plugin" if sender.selectedSegment() == 1 else "settings"
-        self._apply_mode()
-
-    @objc.python_method
-    def _apply_mode(self):
-        plugin = self.state.mode == "plugin"
-        try:
-            self._placeholder.setStringValue_(
-                "描述你想要的插件，比如：一个一键切成笔模式的页面" if plugin
-                else "把触控笔轻点改成右键")
-            for v in getattr(self, "_chips", []):
-                v.setHidden_(plugin)
-        except Exception:
-            pass
-        self.state.clear_draft()
-        self.state.clear_pending()
-        self.state.result_text = ""
-        self.state.undo_available = False
-        self._refresh_cards()
-
     def installDraftClicked_(self, sender):
         st = self.state
         if st.installing or not st.draft:
@@ -791,6 +761,7 @@ class ChatPage(NSObject):
         store.save_session(self.state.messages)
         self._cancel.clear()
         req = self.state.build_request(self._system_prompt(), self._cancel)
+        self.state.clear_draft()
 
         self._refresh_cards()
         self._scroll_page_top()
@@ -865,24 +836,32 @@ class ChatPage(NSObject):
 
     @objc.python_method
     def _system_prompt(self):
-        if self.state.mode == "plugin":
-            from ..gen import contract
-            prompt = contract.SYSTEM_PROMPT
-            draft = self.state.draft or {}
-            if draft.get("files"):
-                prompt += ("\n\n当前草稿（用户要求修改时，基于这些文件改，返回完整文件）：\n"
-                           + json.dumps(draft["files"], ensure_ascii=False))
-            return prompt
+        from ..gen import contract
         api = self._api()
         ctx = api.context_text() if api else "（宿主没有提供设置接口：只能解释，不能改设置）"
-        return "你是 Mipad DP Touch 的设置助手。\n\n" + ctx
+        route = (
+            "\n\n先判断用户的请求属于哪一类，只输出一个 JSON：\n"
+            "- 现有设置能实现 → settings_change（直接用下面的 operations）\n"
+            "- 现有设置做不到、需要新界面或新交互（如截图按钮、悬浮面板、"
+            "按 App 切换的工具栏）→ plugin_draft（按插件契约生成文件）\n"
+            "- 只是询问/解释 → answer\n"
+            "- 明确越界（改系统设置、装软件、执行命令、读写文件）→ unsupported\n"
+            "不要向用户反问\"你是想改设置还是做插件\"，自己判断。\n"
+        )
+        prompt = ("你是 Mipad DP Touch 的助手，既能改现有设置，也能生成新插件。\n\n"
+                  + ctx + route + "\n\n" + contract.SYSTEM_PROMPT)
+        draft = self.state.draft or {}
+        if draft.get("files"):
+            prompt += ("\n\n当前插件草稿（仅当用户要求修改这个插件时使用，返回完整文件）：\n"
+                       + json.dumps(draft["files"], ensure_ascii=False))
+        return prompt
 
     @objc.python_method
     def _finish_reply(self):
         st = self.state
         text = (st.result_text or "").strip()
         obj = _extract_json(text)
-        if st.mode == "plugin":
+        if obj and obj.get("type") == "plugin_draft":
             self._finish_plugin_reply(obj, text)
             return
         api = self._api()
