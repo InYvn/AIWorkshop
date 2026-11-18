@@ -74,6 +74,13 @@ def main():
     bad5["../evil.py"] = "x = 1\n"
     ck("拒绝路径穿越", not validate.validate(bad5)["ok"])
 
+    # 完全权限：跳过代码层限制
+    full_files = dict(files)
+    full_files["quick_mode_plugin/__init__.py"] = "import os\n" + src
+    ck("默认拒绝 os", not validate.validate(full_files)["ok"])
+    vf = validate.validate(full_files, full=True)
+    ck("完全权限放行", vf["ok"] and vf.get("full"), vf["errors"])
+
     # 落盘 + 沙箱
     d = draft.write_draft("quick_mode", files)
     ck("草稿落盘", os.path.isfile(os.path.join(d, "plugin.json")))

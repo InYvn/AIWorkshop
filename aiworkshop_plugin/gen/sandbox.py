@@ -110,8 +110,8 @@ print("SANDBOX_OK")
 '''
 
 
-def run(draft_dir, entry):
-    """返回 {ok, output}；不抛异常。"""
+def run(draft_dir, entry, full=False):
+    """返回 {ok, output}；full=True 时只做语法检查（不 import 未知代码）。"""
     tmp = tempfile.mkdtemp(prefix="plugin-sandbox-")
     try:
         stubs = os.path.join(tmp, "stubs")
@@ -124,6 +124,14 @@ def run(draft_dir, entry):
         entry_path = os.path.join(entry_dir, "__init__.py")
         if not os.path.isfile(entry_path):
             return {"ok": False, "output": "找不到入口文件 %s" % entry_path}
+        if full:
+            import py_compile
+            try:
+                py_compile.compile(entry_path, cfile=os.path.join(tmp, "x.pyc"),
+                                   doraise=True)
+                return {"ok": True, "output": "已跳过沙箱（完全权限），仅语法检查通过"}
+            except Exception as e:
+                return {"ok": False, "output": "语法检查失败：%r" % (e,)}
         env = dict(os.environ)
         env.update({"HOME": tmp, "TMPDIR": tmp, "PYTHONNOUSERSITE": "1",
                     "PYTHONDONTWRITEBYTECODE": "1"})

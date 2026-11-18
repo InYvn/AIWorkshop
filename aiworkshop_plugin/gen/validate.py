@@ -83,8 +83,8 @@ def _check_python(path, source, errors):
                 _err(errors, "%s 不允许访问 %s" % (path, node.attr))
 
 
-def validate(files):
-    """files: {path: text}；返回 {ok, errors, warnings, manifest, entry}。"""
+def validate(files, full=False):
+    """files: {path: text}；full=True 时跳过代码层的导入/调用限制。"""
     errors, warnings = [], []
     if not isinstance(files, dict) or not files:
         return {"ok": False, "errors": ["没有生成任何文件"], "warnings": [],
@@ -130,7 +130,13 @@ def validate(files):
         _err(errors, "缺少入口文件 %s" % py_path)
     if py_path and isinstance(files.get(py_path), str):
         src = files[py_path]
-        _check_python(py_path, src, errors)
+        if full:
+            try:
+                ast.parse(src, filename=py_path)
+            except SyntaxError as e:
+                _err(errors, "%s 语法错误：%s（第 %s 行）" % (py_path, e.msg, e.lineno))
+        else:
+            _check_python(py_path, src, errors)
         if "def create(" not in src and "def build_page(" not in src:
             _err(errors, "入口文件需要定义 create(...) 或 build_page(...)")
         if "dptouch_sdk" not in src:
@@ -138,5 +144,7 @@ def validate(files):
     if "README.md" not in files:
         warnings.append("建议生成 README.md")
 
+    if full:
+        warnings.append("完全权限：不做 import/调用限制，插件可读写文件、执行命令、访问网络")
     return {"ok": not errors, "errors": errors, "warnings": warnings,
-            "manifest": manifest, "entry": entry}
+            "manifest": manifest, "entry": entry, "full": bool(full)}

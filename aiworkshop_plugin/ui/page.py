@@ -413,6 +413,17 @@ class ChatPage(NSObject):
             doc.addSubview_(b)
             self._chips.append(b)
             cx += b.frame().size.width + 8
+        self._full_cb = NSButton.alloc().initWithFrame_(
+            NSMakeRect(x + cw - 214, y - 2, 214, 22))
+        self._full_cb.setButtonType_(3)
+        self._full_cb.setTitle_("允许插件使用完全权限")
+        self._full_cb.setFont_(NSFont.systemFontOfSize_(11.0))
+        self._full_cb.setState_(1 if store.full_permissions() else 0)
+        self._full_cb.setToolTip_("开启后生成的插件可读写文件、执行命令、访问网络；"
+                                  "只在你信任模型输出时使用")
+        self._full_cb.setTarget_(self)
+        self._full_cb.setAction_("fullPermChanged:")
+        doc.addSubview_(self._full_cb)
         y += 44
         self._dynamic_y = y
         self._refresh_cards()
@@ -489,8 +500,10 @@ class ChatPage(NSObject):
     def _result_height(self):
         if self.state.draft:
             files = (self.state.draft.get("files") or {})
-            errs = len((self.state.draft_check or {}).get("errors") or [])
-            return 200.0 + 24.0 * min(4, len(files)) + (36.0 if errs else 0.0)
+            check = self.state.draft_check or {}
+            errs = len(check.get("errors") or [])
+            extra = 20.0 if check.get("full") else 0.0
+            return 200.0 + extra + 24.0 * min(4, len(files)) + (36.0 if errs else 0.0)
         if self.state.pending_ops and self.state.preview:
             return min(440.0, 150.0 + 26.0 * len(self.state.preview))
         if self.state.result_text or self.state.busy:
@@ -609,6 +622,11 @@ class ChatPage(NSObject):
                                     150, 70, 240, 16, size=10.5,
                                     color=GREEN if sb.get("ok") else NSColor.systemRedColor()))
         ry = 94.0
+        if check.get("full"):
+            card.addSubview_(_label("⚠ 完全权限：生成代码可读写文件 / 执行命令 / 访问网络",
+                                    20, 88, cw - 40, 16, size=10,
+                                    color=NSColor.systemRedColor()))
+            ry = 112.0
         for path in list(files)[:4]:
             text = files.get(path) or ""
             card.addSubview_(_label(path, 20, ry, cw - 220, 16, size=11))
@@ -649,6 +667,10 @@ class ChatPage(NSObject):
         ob.setAction_("revealDraftClicked:")
         card.addSubview_(ob)
 
+    def fullPermChanged_(self, sender):
+        store.set_full_permissions(bool(sender.state()))
+        self._refresh_cards()
+
     def installDraftClicked_(self, sender):
         st = self.state
         if st.installing or not st.draft:
@@ -668,7 +690,7 @@ class ChatPage(NSObject):
             pid = str(meta.get("id") or "")
             entry = str(meta.get("entry") or (pid + "_plugin"))
             d = D.write_draft(pid, files)
-            sb = sandbox.run(d, entry)
+            sb = sandbox.run(d, entry, full=bool((self.state.draft_check or {}).get("full")))
             if not sb.get("ok"):
                 self._q.put(("draft_done", (sb, None, pid)))
                 return
@@ -850,6 +872,10 @@ class ChatPage(NSObject):
         )
         prompt = ("你是 Mipad DP Touch 的助手，既能改现有设置，也能生成新插件。\n\n"
                   + ctx + route + "\n\n" + contract.SYSTEM_PROMPT)
+        if store.full_permissions():
+            prompt += ("\n\n用户已开启「完全权限」：可以使用 os / sys / subprocess / socket / "
+                       "ctypes / pathlib 等任意模块，也可以读写文件、执行命令。"
+                       "仍然必须遵守文件结构与入口契约。")
         draft = self.state.draft or {}
         if draft.get("files"):
             prompt += ("\n\n当前插件草稿（仅当用户要求修改这个插件时使用，返回完整文件）：\n"
@@ -925,7 +951,7 @@ class ChatPage(NSObject):
             st.result_text = ("未生成插件：模型没有按协议返回 plugin_draft。\n\n"
                               + text[:400])
         else:
-            res = validate.validate(obj["files"])
+            res = validate.validate(obj["files"], full=store.full_permissions())
             st.draft = {"summary": obj.get("summary") or "", "files": obj["files"]}
             st.draft_check = res
             st.draft_sandbox = {}

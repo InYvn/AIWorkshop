@@ -106,3 +106,15 @@ def list_sessions():
     except Exception:
         pass
     return sorted(out, key=lambda x: -x["mtime"])
+
+
+# ---------------------------------------------------------------- 插件权限
+def full_permissions():
+    """生成插件是否允许完全权限（读写文件/执行命令/网络）。默认关。"""
+    return bool(load_config().get("allow_full_permissions"))
+
+
+def set_full_permissions(on):
+    cfg = load_config()
+    cfg["allow_full_permissions"] = bool(on)
+    save_config(cfg)
