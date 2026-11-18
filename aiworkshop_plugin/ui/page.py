@@ -279,6 +279,14 @@ class ChatPage(NSObject):
     @objc.python_method
     def render(self, box, w, h):
         self._box, self._w, self._h = box, float(w), float(h)
+        old = getattr(self, "_scroll", None)
+        if old is not None:
+            try:
+                old.removeFromSuperview()
+            except Exception:
+                pass
+        # 宿主每次切页都会重新调用 render：重建骨架，不能沿用上一个 doc
+        self._built = False
         self._scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
         self._scroll.setDrawsBackground_(True)
         self._scroll.setBackgroundColor_(_page_bg())
