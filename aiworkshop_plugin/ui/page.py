@@ -26,7 +26,7 @@ from .state import Request, WorkshopState
 
 W_MAX = 760.0
 PAD = 32.0
-ACCENT = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.42, 0.36, 0.91, 1.0)
+ACCENT = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.929, 0.416, 0.341, 1.0)
 GREEN = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.13, 0.62, 0.42, 1.0)
 TEXT = NSColor.labelColor()
 DIM = NSColor.secondaryLabelColor()
@@ -42,7 +42,16 @@ def _dark():
 
 
 def _card_bg():
-    return NSColor.colorWithCalibratedWhite_alpha_(0.17 if _dark() else 1.0, 1.0)
+    # Oink 风格：浅色纯白卡片 / 深色 #232220
+    return NSColor.colorWithCalibratedWhite_alpha_(0.137 if _dark() else 1.0, 1.0)
+
+
+def _primary_bg():
+    return NSColor.colorWithCalibratedWhite_alpha_(0.96 if _dark() else 0.11, 1.0)
+
+
+def _on_primary():
+    return NSColor.colorWithCalibratedWhite_alpha_(0.11 if _dark() else 0.96, 1.0)
 
 
 _ACTION_CN = {
@@ -61,11 +70,12 @@ def _show(v):
 
 
 def _page_bg():
-    return NSColor.colorWithCalibratedWhite_alpha_(0.10 if _dark() else 0.965, 1.0)
+    # Oink 风格：浅色 #F9F9FB / 深色 #1B1A18
+    return NSColor.colorWithCalibratedWhite_alpha_(0.105 if _dark() else 0.976, 1.0)
 
 
 def _border():
-    return NSColor.colorWithCalibratedWhite_alpha_(1.0 if _dark() else 0.0, 0.12)
+    return NSColor.colorWithCalibratedWhite_alpha_(1.0 if _dark() else 0.0, 0.07)
 
 
 def _label(text, x, y, w, h, size=13.0, bold=False, color=None, align=0):
@@ -82,13 +92,21 @@ def _label(text, x, y, w, h, size=13.0, bold=False, color=None, align=0):
     return f
 
 
-def _card(box, x, y, w, h, radius=14.0):
+def _card(box, x, y, w, h, radius=20.0):
     v = _Card.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
     v.setWantsLayer_(True)
     v.layer().setBackgroundColor_(_card_bg().CGColor())
     v.layer().setCornerRadius_(radius)
+    try:
+        v.layer().setCornerCurve_("continuous")
+    except Exception:
+        pass
     v.layer().setBorderWidth_(1.0)
     v.layer().setBorderColor_(_border().CGColor())
+    # 轻微浮起，接近 Oink 的 inset 高光 + 低对比阴影
+    v.layer().setShadowOpacity_(0.16 if _dark() else 0.05)
+    v.layer().setShadowRadius_(10.0)
+    v.layer().setShadowOffset_((0.0, -1.0))
     box.addSubview_(v)
     return v
 
@@ -357,7 +375,14 @@ class ChatPage(NSObject):
         y += 78
 
         # ---- Hero
-        doc.addSubview_(_label("想让平板怎样工作？", x, y, cw, 38, size=26, bold=True))
+        hero = _label("想让平板怎样工作？", x, y, cw, 40, size=28, bold=True)
+        try:
+            rf = NSFont.fontWithName_size_("SFProRounded-Bold", 28.0)
+            if rf is not None:
+                hero.setFont_(rf)
+        except Exception:
+            pass
+        doc.addSubview_(hero)
         y += 44
         doc.addSubview_(_label("描述你的想法：现有设置能实现就直接改，做不到就生成一个插件。",
                                x, y, cw, 18, size=12, color=DIM))
@@ -382,12 +407,12 @@ class ChatPage(NSObject):
         self._send_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 148, ph - 42, 128, 34))
         self._send_btn.setBordered_(False)
         self._send_btn.setWantsLayer_(True)
-        self._send_btn.layer().setBackgroundColor_(ACCENT.CGColor())
+        self._send_btn.layer().setBackgroundColor_(_primary_bg().CGColor())
         self._send_btn.layer().setCornerRadius_(17.0)
         self._send_btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
             "✦  分析想法",
             {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.5),
-             NSForegroundColorAttributeName: NSColor.whiteColor()}))
+             NSForegroundColorAttributeName: _on_primary()}))
         self._send_btn.setTarget_(self)
         self._send_btn.setAction_("sendClicked:")
         card.addSubview_(self._send_btn)
@@ -406,6 +431,15 @@ class ChatPage(NSObject):
             b.setBezelStyle_(1)
             b.setFont_(NSFont.systemFontOfSize_(11.0))
             b.setTag_(i)
+            b.setBordered_(False)
+            b.setWantsLayer_(True)
+            b.layer().setBackgroundColor_(_card_bg().CGColor())
+            b.layer().setCornerRadius_(13.0)
+            b.layer().setBorderWidth_(1.0)
+            b.layer().setBorderColor_(_border().CGColor())
+            b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+                t, {NSFontAttributeName: NSFont.systemFontOfSize_(11.0),
+                    NSForegroundColorAttributeName: TEXT}))
             b.setTarget_(self)
             b.setAction_("chipClicked:")
             b.sizeToFit()
@@ -449,7 +483,7 @@ class ChatPage(NSObject):
         x = (w - cw) / 2.0
         y = self._dynamic_y
 
-        doc.addSubview_(_label("建议方案", x, y, 200, 20, size=14, bold=True))
+        doc.addSubview_(_label("建议方案", x, y, 200, 20, size=15, bold=True))
         doc.addSubview_(_label("模型给出方案 · 确认后应用", x + cw - 220, y + 3, 220, 14,
                                size=10, color=FAINT, align=2))
         y += 28
@@ -460,7 +494,7 @@ class ChatPage(NSObject):
         y += rh + 26
 
         recent = self.state.recent(3)
-        self._recent_title = _label("最近的想法", x, y, 200, 20, size=14, bold=True)
+        self._recent_title = _label("最近的想法", x, y, 200, 20, size=15, bold=True)
         doc.addSubview_(self._recent_title)
         self._recent_count = _label("%d 条" % len(recent), x + cw - 60, y + 3, 60, 14,
                                     size=10, color=FAINT, align=2)
@@ -475,7 +509,7 @@ class ChatPage(NSObject):
                                    0, 0, cw, 18, size=11, color=FAINT))
             by += 28
         for m in reversed(recent):
-            row = _card(box, 0, by, cw, 56, radius=10)
+            row = _card(box, 0, by, cw, 56, radius=12)
             ic = NSImageView.alloc().initWithFrame_(NSMakeRect(16, 19, 18, 18))
             img = _symbol("bolt", 14)
             if img is not None:
@@ -563,11 +597,11 @@ class ChatPage(NSObject):
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - bw - 20, rh - 42, bw, 30))
             btn.setBordered_(False)
             btn.setWantsLayer_(True)
-            btn.layer().setBackgroundColor_(ACCENT.CGColor())
+            btn.layer().setBackgroundColor_(_primary_bg().CGColor())
             btn.layer().setCornerRadius_(15.0)
             btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
                 "应用修改", {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.0),
-                          NSForegroundColorAttributeName: NSColor.whiteColor()}))
+                          NSForegroundColorAttributeName: _on_primary()}))
             btn.setTarget_(self)
             btn.setAction_("applyClicked:")
             card.addSubview_(btn)
@@ -649,11 +683,12 @@ class ChatPage(NSObject):
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - bw - 20, rh - 42, bw, 30))
         btn.setBordered_(False)
         btn.setWantsLayer_(True)
-        btn.layer().setBackgroundColor_((ACCENT if ok else ACCENT.colorWithAlphaComponent_(0.38)).CGColor())
+        btn.layer().setBackgroundColor_((_primary_bg() if ok
+                                         else _primary_bg().colorWithAlphaComponent_(0.35)).CGColor())
         btn.layer().setCornerRadius_(15.0)
         btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
             "安装插件", {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.0),
-                      NSForegroundColorAttributeName: NSColor.whiteColor()}))
+                      NSForegroundColorAttributeName: _on_primary()}))
         btn.setEnabled_(ok and not st.installing and not st.draft_installed)
         btn.setTarget_(self)
         btn.setAction_("installDraftClicked:")
@@ -743,7 +778,7 @@ class ChatPage(NSObject):
             has = bool(str(self._tv.string() or "").strip())
         self._send_btn.setEnabled_(bool(has))
         self._send_btn.layer().setBackgroundColor_(
-            (ACCENT if has else ACCENT.colorWithAlphaComponent_(0.38)).CGColor())
+            (_primary_bg() if has else _primary_bg().colorWithAlphaComponent_(0.35)).CGColor())
 
     def textView_doCommandBySelector_(self, tv, sel):
         from AppKit import NSApp
